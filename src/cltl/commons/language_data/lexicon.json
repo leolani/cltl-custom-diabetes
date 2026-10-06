@@ -1,0 +1,1229 @@
+{
+  "pronouns": {
+    "subject": {
+      "i": {
+        "person": "first",
+        "number": "singular"
+        },
+      "you": {
+        "person": "second",
+        "number": [
+          "singular",
+          "plural"
+          ]
+        },
+      "he": {
+        "person": "third",
+        "number": "singular",
+        "gender": "masculine"
+        },
+      "she": {
+        "person": "third",
+        "number": "singular",
+        "gender": "feminine"
+        },
+      "it": {
+        "person": "third",
+        "number": "singular",
+        "gender": "neuter"
+        },
+      "we": {
+        "person": "first",
+        "number": "plural"
+        },
+      "they": {
+        "person": "third",
+        "number": "plural"
+        }
+      },
+    "object": {
+      "me": {
+        "person": "first",
+        "number": "singular"
+        },
+      "you": {
+        "person": "second",
+        "number": [
+          "singular",
+          "plural"
+          ]
+        },
+      "him": {
+        "person": "third",
+        "number": "singular",
+        "gender": "masculine"
+        },
+      "her": {
+        "person": "third",
+        "number": "singular",
+        "gender": "feminine"
+        },
+      "it": {
+        "person": "third",
+        "number": "singular",
+        "gender": "neuter"
+        },
+      "us": {
+        "person": "first",
+        "number": "plural"
+      },
+      "them": {
+        "person": "third",
+        "number": "plural"
+        }
+      },
+    "possessive": {
+      "dependent": {
+        "my": {
+          "person": "first",
+          "number": "singular"
+          },
+        "your": {
+          "person": "second",
+          "number": [
+            "singular",
+            "plural"
+            ]
+          },
+        "his": {
+          "person": "third",
+          "number": "singular",
+          "gender": "masculine"
+          },
+        "her": {
+          "person": "third",
+          "number": "singular",
+          "gender": "feminine"
+          },
+        "its": {
+          "person": "third",
+          "number": "singular",
+          "gender": "neuter"
+          },
+        "our": {
+          "person": "first",
+          "number": "plural"
+          },
+        "their": {
+          "person": "third",
+          "number": "plural"
+          }
+        },
+      "independent": {
+        "mine": {
+          "person": "first",
+          "number": "singular"
+          },
+        "yours": {
+          "person": "second",
+          "number": [
+            "singular",
+            "plural"
+            ]
+          },
+        "his": {
+          "person": "third",
+          "number": "singular",
+          "gender": "masculine"
+          },
+        "hers": {
+          "person": "third",
+          "number": "singular",
+          "gender": "feminine"
+          },
+        "ours": {
+          "person": "first",
+          "number": "plural"
+          },
+        "theirs": {
+          "person": "third",
+          "number": "plural"
+          }
+        }
+      },
+    "reflexive": {
+      "myself": {
+        "person": "first",
+        "number": "singular"
+        },
+      "yourself": {
+        "person": "second",
+        "number": "singular"
+        },
+      "himself": {
+        "person": "third",
+        "number": "singular",
+        "gender": "masculine"
+        },
+      "herself": {
+        "person": "third",
+        "number": "singular",
+        "gender": "feminine"
+        },
+      "itself": {
+        "person": "third",
+        "number": "singular",
+        "gender": "neuter"
+        },
+      "ourselves": {
+        "person": "first",
+        "number": "plural"
+        },
+      "yourselves": {
+        "person": "second",
+        "number": "plural"
+        },
+      "themselves": {
+        "person": "third",
+        "number": "plural"
+        }
+      },
+      "indefinite": {
+        "person": {
+          "everyone": {
+            "quantity": "all"
+            },
+          "everybody": {
+            "quantity": "all"
+            },
+          "someone": {
+            "quantity": "part",
+            "sentence type": "affirmative"
+            },
+          "somebody": {
+            "quantity": "part",
+            "sentence type": "affirmative"
+            },
+          "anyone": {
+            "quantity": "part",
+            "sentence type": "negative"
+            },
+          "anybody": {
+            "quantity": "part",
+            "sentence type": "negative"
+            },
+          "no one": {
+            "quantity": "none"
+            },
+          "nobody": {
+            "quantity": "none"
+            }
+          },
+        "place": {
+          "everywhere": {
+            "quantity": "all"
+            },
+          "somewhere": {
+            "quantity": "part",
+            "sentence type": "affirmative"
+            },
+          "anywhere": {
+            "quantity": "part",
+            "sentence type": "negative"
+            },
+          "nowhere": {
+            "quantity": "none"
+            }
+          },
+        "thing": {
+          "everything": {
+            "quantity": "all"
+            },
+          "something": {
+            "quantity": "part",
+            "sentence type": "affirmative"
+            },
+          "anything": {
+            "quantity": "part",
+            "sentence type": "negative"
+            },
+          "nothing": {
+            "quantity": "none"
+            }
+          }
+        }
+      },
+  "verbs": {
+    "to be": {
+      "am": {
+        "tense": "present",
+        "person": "first",
+        "number": "singular"
+        },
+      "are": {
+        "tense": "present",
+        "person": [
+          "second",
+          "third"
+          ],
+        "number": [
+          "singular",
+          "plural"
+          ]
+        },
+      "is": {
+        "tense": "present",
+        "person": "third",
+        "number": "singular"
+        },
+      "was": {
+        "tense": "simple past",
+        "person": [
+          "first",
+          "third"
+          ],
+        "number": "singular"
+        },
+      "were": {
+        "tense": "simple past",
+        "person": [
+          "first",
+          "second",
+          "third"
+          ],
+        "number": [
+          "singular",
+          "plural"
+          ]
+        },
+        "been": {
+          "tense": "past participle"
+        }
+      },
+    "auxiliaries": {
+      "to do": {
+        "do": {
+          "tense": "present",
+          "person": [
+            "first",
+            "second",
+            "third"
+            ],
+          "number": [
+            "singular",
+            "plural"
+            ]
+          },
+        "does": {
+          "tense": "present",
+          "person": "third",
+          "number": "singular"
+          },
+        "did": {
+          "tense": "simple past",
+          "person": [
+            "first",
+            "second",
+            "third"
+            ],
+          "number": [
+            "singular",
+            "plural"
+            ]
+          },
+        "done": {
+          "tense": "past participle"
+          }
+        },
+      "have":{
+        "have":{
+          "tense": "present",
+          "person": [
+            "first",
+            "second",
+            "third"
+            ],
+          "number": [
+            "singular",
+            "plural"
+            ]
+        },
+        "has":{
+          "tense": "present",
+          "person": "third",
+          "number": "singular"
+        },
+        "had":
+        {
+          "tense": "past",
+          "person": [
+            "first",
+            "second",
+            "third"
+            ],
+          "number": [
+            "singular",
+            "plural"
+            ]
+
+        }
+      },
+      "modals": {
+        "can": {
+          "past": "could",
+          "root": [
+            "ability",
+            "permission"
+            ]},
+        "may": {
+          "root": [
+          "permission",
+          "possibility"
+            ],
+          "certainty": "0.5"
+          },
+        "might": {
+          "root": [
+            "permission",
+            "possibility"
+              ],
+          "certainty": "0.5"
+          },
+        "must": {
+          "root": "obligation",
+          "certainty": "1"
+          },
+        "shall": {
+          "root": [
+            "obligation",
+            "prediction"
+            ],
+          "certainty": "1"
+          },
+        "should": {
+          "root": "obligation",
+          "certainty": "0.75"
+          },
+        "will": {
+          "past": "would",
+          "root": [
+            "volition",
+            "prediction"
+              ],
+          "certainty": "1"
+            }
+          }
+        },
+    "lexical verbs": {
+      "like": {
+        "sentiment": "0.75",
+        "simple past": "liked",
+        "past participle": "liked",
+        "antonym": "dislike"
+        },
+      "dislike": {
+        "sentiment": "-0.75",
+        "simple past": "disliked",
+        "past participle": "disliked",
+        "antonym": "like"
+        },
+      "love": {
+        "sentiment": "1",
+        "simple past": "loved",
+        "past participle": "loved",
+        "antonym": "hate"
+        },
+      "hate": {
+        "sentiment": "-1",
+        "simple past": "hated",
+        "past participle": "hated",
+        "antonym": "love"
+        },
+      "enjoy": {
+        "sentiment": "1",
+        "simple past": "enjoyed",
+        "past participle": "enjoyed"
+        },
+      "appreciate": {
+        "sentiment": "0.75",
+        "simple past": "appreciated",
+        "past participle": "appreciated"
+        },
+      "know": {
+        "certainty": "1",
+        "simple past": "knew",
+        "past participle": "known"
+        },
+      "think": {
+        "certainty": "0.65",
+        "simple past": "thought",
+        "past participle": "tought"
+        },
+      "believe": {
+        "certainty":"0.75",
+        "simple past": "believed",
+        "past participle": "believed"
+        },
+      "guess": {
+        "certainty": "0.5",
+        "simple past": "guessed",
+        "past participle": "guessed"
+        },
+      "suppose": {
+        "certainty": "0.5",
+        "simple past": "supposed",
+        "past participle": "supposed"
+        }
+      }
+    },
+  "determiners": {
+    "articles": {
+      "the": "definite",
+      "a": "indefinite",
+      "an": "indefinite"
+    },
+    "demonstratives": {
+      "this": {
+        "proximity": "proximal",
+        "number": "singular"
+      },
+      "that": {
+        "proximity": "distal",
+        "number": "singular"
+      },
+      "these": {
+        "proximity": "proximal",
+        "number": "plural"
+      },
+      "those": {
+        "proximity": "distal",
+        "number": "plural"
+      }
+    },
+    "possessives": {
+      "my": {
+        "person": "first",
+        "number": "singular"
+        },
+      "your": {
+        "person": "second",
+        "number": [
+          "singular",
+          "plural"
+          ]
+        },
+      "his": {
+        "person": "third",
+        "number": "singular",
+        "gender": "masculine"
+        },
+      "her": {
+        "person": "third",
+        "number": "singular",
+        "gender": "feminine"
+        },
+      "its": {
+        "person": "third",
+        "number": "singular",
+        "gender": "neuter"
+        },
+      "our": {
+        "person": "first",
+        "number": "plural"
+        },
+      "their": {
+        "person": "third",
+        "number": "plural"
+        }
+    },
+    "quantifiers": {
+        "few" :{
+          "quantity": "small"
+        },
+        "a few" :{
+          "quantity": "small"
+        },
+        "little" :{
+          "quantity": "small"
+        },
+        "a little" :{
+          "quantity": "small"
+        },
+        "a couple" :{
+          "quantity": "small"
+        },
+        "many": {
+          "quantity": "large"
+        },
+        "much": {
+          "quantity": "large"
+        },
+        "a lot of": {
+          "quantity": "large"
+        },
+        "lots of": {
+          "quantity": "large"
+        },
+        "several": {
+          "quantity": "large"
+        },
+        "some": {
+          "quantity": "relative"
+        },
+        "any": {
+          "quantity": "relative"
+        },
+        "each": {
+          "quantity": "relative"
+        },
+        "every": {
+          "quantity": "relative"
+        },
+        "all": {
+          "quantity": "relative"
+        },
+        "whole": {
+          "quantity": "relative"
+        },
+        "either": {
+          "quantity": "relative"
+        },
+        "neither": {
+          "quantity": "relative"
+        },
+        "no": {
+          "quantity": "zero"
+        },
+        "another": {
+          "quantity": "relative"
+        },
+        "most": {
+          "quantity": "relative"
+        },
+        "most of": {
+          "quantity": "relative"
+        }
+      },
+    "wh-determiners": {
+      "what": {
+        "response": "object"
+        },
+      "which": {
+        "response": "object"
+        },
+      "whose": {
+        "response": "person"
+        }
+      },
+    "numerals": {
+      "cardinals": {
+        "zero": {
+          "integer": "0"
+        },
+        "one": {
+
+          "integer": "1"
+        },
+        "two": {
+          "integer": "2"
+        },
+        "three": {
+          "integer": "3"
+        },
+        "four": {
+          "integer": "4"
+        },
+        "five": {
+          "integer": "5"
+        },
+        "six": {
+          "integer": "6"
+        },
+        "seven": {
+          "integer": "7"
+        },
+        "eight": {
+          "integer": "8"
+        },
+        "nine": {
+          "integer": "9"
+        },
+        "ten": {
+          "integer": "10"
+        },
+        "eleven": {
+          "integer": "11"
+        },
+        "twelve": {
+          "integer": "12"
+        },
+        "twenty": {
+          "integer": "20"
+        },
+        "thirty": {
+          "integer": "30"
+        },
+        "forty": {
+          "integer": "40"
+        },
+        "fifty": {
+          "integer": "50"
+        },
+        "sixty": {
+          "integer": "60"
+        },
+        "seventy": {
+          "integer": "70"
+        },
+        "eighty": {
+          "integer": "80"
+        },
+        "ninety": {
+          "integer": "90"
+        },
+        "one hundred": {
+          "integer": "100"
+        }
+      },
+      "ordinals": {
+        "first": {},
+        "second": {},
+        "third": {},
+        "fourth": {},
+        "fifth": {},
+        "sixth": {},
+        "seventh": {},
+        "eighth": {},
+        "ninth": {},
+        "tenth": {},
+        "eleventh": {},
+        "twelfth": {}
+        }
+      },
+    "s-genitive": {
+      "'s": {}
+    }
+    },
+  "conjunctions": {
+    "coordinating": {
+      "for": {
+        "connection": "rationale"
+        },
+      "and": {
+        "connection": "non-contrast"
+        },
+      "nor": {
+        "connection": "negative non-contrast"
+        },
+      "but": {
+        "connection": [
+          "contrast",
+          "exception"
+          ]
+        },
+      "or": {
+        "connection": "alternative"
+        },
+      "yet": {
+        "connection": [
+          "contrast",
+          "exception"
+          ]
+        },
+      "so": {
+        "connection": "consequence"
+        }
+      },
+    "subordinating": {
+      "after": {},
+      "although": {},
+      "because": {},
+      "before": {},
+      "if": {},
+      "since": {},
+      "so that": {},
+      "than": {},
+      "that": {},
+      "though": {},
+      "unless": {},
+      "until": {},
+      "whenever": {},
+      "wherever": {},
+      "while": {}
+      }
+    },
+  "question words": {
+    "what": {
+      "response": "object"
+      },
+    "who": {
+      "response": "person"
+      },
+    "when": {
+      "response": "time"
+      },
+    "where": {
+      "response": "location"
+      },
+    "how": {
+      "response": "manner"
+      },
+    "why": {
+      "response": "reason"
+      },
+    "which": {
+      "response": "choice"
+      }
+    },
+  "kinship": {
+    "friend":{
+      "gender": "neutral",
+      "distance": "0",
+      "predicate": "be-friends-with"
+    },
+    "husband":{
+      "gender": "male",
+      "distance": "0",
+      "predicate": "be-husband-of"
+    },
+    "wife":{
+      "gender": "female",
+      "distance": "0",
+      "predicate": "be-wife-of"
+    },
+    "spouse":{
+      "gender": "neutral",
+      "distance": "0",
+      "predicate": "be-spouse-of"
+
+    },
+    "partner":{
+      "gender": "neutral",
+      "distance": "0",
+      "predicate": "be-partner-of"
+    },
+    "parent": {
+      "gender": "neutral",
+      "distance": "1",
+      "predicate": "be-parent-of"
+    },
+    "child": {
+      "gender": "neutral",
+      "distance": "1",
+      "predicate": "be-child-of"
+    },
+    "sibling": {
+      "gender": "neutral",
+      "distance": "1",
+      "predicate": "be-sibling-of"
+    },
+    "grandparent": {
+      "gender": "neutral",
+      "distance": "2",
+      "predicate": "be-grandparent-of"
+    },
+    "grandchild": {
+      "gender": "neutral",
+      "distance": "2",
+      "predicate": "be-grandchild-of"
+    },
+    "mother": {
+      "gender": "female",
+      "distance": "1",
+      "predicate": "be-mother-of"
+
+    },
+    "father": {
+      "gender": "male",
+      "distance": "1",
+      "predicate": "be-father-of"
+    },
+    "brother": {
+      "gender": "male",
+      "distance": "1",
+      "predicate": "be-brother-of"
+
+    },
+    "sister": {
+      "gender": "female",
+      "distance": "1",
+      "predicate": "be-sister-of"
+    },
+    "daughter": {
+      "gender": "female",
+      "distance": "1",
+      "predicate": "be-daughter-of"
+    },
+    "son": {
+      "gender": "male",
+      "distance": "1",
+      "predicate": "be-son-of"
+    },
+    "uncle": {
+      "gender": "male",
+      "distance": "2",
+      "predicate": "be-uncle-of"
+    },
+    "aunt": {
+      "gender": "female",
+      "distance": "2",
+      "predicate": "be-aunt-of"
+    },
+    "nephew": {
+      "gender": "male",
+      "distance": "2",
+      "predicate": "be-nephew-of"
+    },
+    "niece": {
+      "gender": "female",
+      "distance": "2",
+      "predicate": "be-niece-of"
+    },
+    "cousin": {
+      "gender": "neutral",
+      "distance": "2",
+      "predicate": "be-cousin-of"
+    },
+    "grandmother": {
+      "gender": "female",
+      "distance": "2",
+      "predicate": "be-grandmother-of"
+    },
+    "grandfather": {
+      "gender": "male",
+      "distance": "2",
+      "predicate": "be-grandfather-of"
+    },
+    "grandson": {
+      "gender": "male",
+      "distance": "2",
+      "predicate": "be-grandson-of"
+    },
+    "granddaughter": {
+      "gender": "female",
+      "distance": "2",
+      "predicate": "be-granddaugher-of"
+    }
+  },
+  "predicates": [
+      "like",
+      "know",
+      "be-from",
+      "be-at",
+      "be-in",
+      "be-on",
+      "be-inside",
+      "live-in",
+      "love",
+      "enjoy",
+      "see",
+      "read",
+      "listen",
+      "watch",
+      "visit",
+      "play",
+      "sport",
+      "music",
+      "game",
+      "make",
+      "prepare",
+      "eat",
+      "drink",
+      "dinner",
+      "breakfast",
+      "lunch",
+      "own",
+      "married-to",
+      "clean",
+      "party",
+      "travel-to",
+      "visit",
+      "create",
+      "cook",
+      "perform",
+      "prepare-drink",
+      "program",
+      "write",
+      "can"
+    ],
+
+  "categories": [
+      "book",
+      "movie",
+      "friend",
+      "food",
+      "drink",
+      "laptop"
+    ],
+
+  "containers": [
+    "airplane",
+    "backpack",
+    "bottle",
+    "bowl",
+    "bus",
+    "car",
+    "closet",
+    "drawer",
+    "glass",
+    "handbag",
+    "kettle",
+    "oven",
+    "plate",
+    "pot",
+    "refrigerator",
+    "ship",
+    "sink",
+    "spoon",
+    "suitcase",
+    "toaster",
+    "train",
+    "truck",
+    "vase,",
+    "building",
+    "bar,",
+    "cafe,",
+    "pub,",
+    "club",
+    "house",
+    "library",
+    "museum",
+    "office",
+    "pub",
+    "home",
+    "restaurant",
+    "house"
+    ],
+
+  "professions": [
+    "teacher",
+    "student",
+    "mother",
+    "father",
+    "chauffeur",
+    "driver",
+    "carpenter",
+    "construction-worker",
+    "baker",
+    "butcher",
+    "bartender",
+    "waiter",
+    "professor",
+    "programmer",
+    "linguist",
+    "doctor",
+    "nurse",
+    "health-professional",
+    "surgeon",
+    "police-officer",
+    "scientist",
+    "engineer",
+    "accountant,",
+    "dentist",
+    "chef,",
+    "waiter",
+    "waitress",
+    "soldier",
+    "general",
+    "captain",
+    "sergeant",
+    "lieutenant",
+    "sailor",
+    "priest",
+    "monk",
+    "instructor",
+    "coach",
+    "psychologist",
+    "psychiatrist",
+    "secretary",
+    "receptionist",
+    "agent",
+    "policeman",
+    "policewoman",
+    "plumber",
+    "pilot",
+    "model",
+    "newsreader",
+    "optician",
+    "pharmacist",
+    "mechanic",
+    "lifeguard",
+    "hairdresser",
+    "gardener",
+    "fisherman",
+    "farmer",
+    "engineer",
+    "electrician",
+    "florist",
+    "journalist",
+    "lecturer",
+    "designer",
+    "bricklayer",
+    "author",
+    "actor",
+    "actress",
+    "astronomer",
+    "cook",
+    "analyst",
+    "data-analyst",
+    "architect,",
+    "artist,",
+    "comedian",
+    "judge",
+    "politician",
+    "manager",
+    "desk-officer",
+    "cleaner",
+    "painter",
+    "poet",
+    "writer"
+    ],
+
+  "activities": {
+      "theater": {
+        "predicate": "do-activity"
+      },
+      "movie": {
+        "predicate": "do-activity"
+      },
+      "movies": {
+        "predicate": "do-activity"
+      },
+      "video": {
+        "predicate": "do-activity"
+      },
+      "cards": {
+        "predicate": "do-activity"
+      },
+      "cinema": {
+        "predicate": "do-activity"
+      },
+      "concert": {
+        "predicate": "do-activity"
+      },
+      "show": {
+        "predicate": "do-activity"
+      },
+      "festival": {
+        "predicate": "do-activity"
+      },
+      "performance": {
+        "predicate": "do-activity"
+      },
+      "pub": {
+        "predicate": "do-activity"
+      },
+      "bar": {
+        "predicate": "do-activity"
+      },
+      "club": {
+        "predicate": "do-activity"
+      },
+      "cafe": {
+        "predicate": "do-activity"
+      },
+      "restaurant": {
+        "predicate": "do-activity"
+      },
+      "dance": {
+        "predicate": "do-activity"
+      },
+      "dancing": {
+        "predicate": "do-activity"
+      },
+      "disco": {
+        "predicate": "do-activity"
+      },
+      "exhibition": {
+        "predicate": "do-activity"
+      },
+      "museum": {
+        "predicate": "do-activity"
+      },
+      "match": {
+        "predicate": "do-activity"
+      },
+      "game": {
+        "predicate": "do-activity"
+      },
+      "soccer": {
+        "predicate": "do-activity"
+      },
+      "tennis": {
+        "predicate": "do-activity"
+      },
+      "running": {
+        "predicate": "do-activity"
+      },
+      "swimming": {
+        "predicate": "do-activity"
+      },
+      "cycling": {
+        "predicate": "do-activity"
+      },
+      "walking": {
+        "predicate": "do-activity"
+      }
+    },
+
+  "feelings": {
+       "sad": {
+         "sentiment": "negative",
+         "predicate": "feel"
+       },
+       "excellent": {
+         "sentiment": "positive",
+         "predicate": "feel"
+       },
+       "fine": {
+         "sentiment": "positive",
+         "predicate": "feel"
+       },
+       "awful": {
+         "sentiment": "negative",
+         "predicate": "feel"
+       },
+       "awesome": {
+         "sentiment": "positive",
+         "predicate": "feel"
+       },
+       "ok": {
+         "sentiment": "positive",
+         "predicate": "feel"
+       },
+      "fantastic": {
+         "sentiment": "positive",
+         "predicate": "feel"
+       },
+       "happy": {
+         "sentiment": "positive",
+         "predicate": "feel"
+       },
+       "great": {
+         "sentiment": "positive",
+         "predicate": "feel"
+       },
+       "terrible": {
+         "sentiment": "negative",
+         "predicate": "feel"
+       },
+       "sick": {
+         "sentiment": "negative",
+         "predicate": "feel"
+       },
+       "healthy": {
+         "sentiment": "positive",
+         "predicate": "feel"
+       },
+       "strong": {
+         "sentiment": "positive",
+         "predicate": "feel"
+       },
+       "weak": {
+         "sentiment": "negative",
+         "predicate": "feel"
+       },
+       "energetic": {
+         "sentiment": "positive",
+         "predicate": "feel"
+       },
+       "good": {
+         "sentiment": "positive",
+         "predicate": "feel"
+       },
+       "bad": {
+         "sentiment": "negative",
+         "predicate": "feel"
+       }
+     }
+  }

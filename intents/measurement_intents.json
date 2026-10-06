@@ -1,0 +1,33 @@
+[
+  {
+  "activity_types": ["measurement"],
+  "patient_type": ["blood sugar level"],
+  "patient_question": "Did you measure {patient_type} lately?",
+  "activity_date": "date",
+  "date_question": "When did you measure {activity}?",
+  "secondary_objectives": {
+    "patient_qualification": "quantity",
+    "qualification_question": "What {patient_type} did you measure?"
+  }}
+  ,
+  {
+  "activity_types": ["measurement"],
+  "patient_type": ["heart rate"],
+  "patient_question": "Did you measure {patient_type} lately?",
+  "activity_date": "date",
+  "date_question": "When did you measure {activity}?",
+  "secondary_objectives": {
+    "patient_qualification": "quantity",
+    "qualification_question": "What {patient_type} did you measure?"
+  }},
+  {
+  "activity_types": ["measurement"],
+  "patient_type": ["blood pressure"],
+  "patient_question": "Did you measure {patient_type} lately?",
+  "activity_date": "date",
+  "date_question": "When did you measure {activity}?",
+  "secondary_objectives": {
+    "patient_qualification": "quantity",
+    "qualification_question": "What {patient_type} did you measure?"
+  }}
+]

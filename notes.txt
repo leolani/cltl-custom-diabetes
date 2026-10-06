@@ -1,0 +1,129 @@
+#### How to run the application:
+
+* start platform and client/backbone images in Docker
+* adapt the clients/backbone/config/custom.config to laptop or pepper
+* ./run_host-server.sh from cleints/backbone: uses the venv (nstalls it if not present)
+* run the llamacpp with the VLM for object recognition (Codeing/vlm/guff):
+-  llama serve -m Qwen3VL-8B-Instruct-Q4_K_M.gguf --mmproj mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf -c 8184 -ngl all --host 0.0.0.0 --port 9009
+* run cltl-custom-object-recognition: adapt the KG repo in the config for scene storage
+- conda deactivate
+- source ./venv/bin/activate
+- CLTL_AMQP_URL='amqp://eliza:eliza123@127.0.0.1:5672/' \
+CLTL_TENANT=tenant-a \
+CLTL_STORAGE_URL=http://127.0.0.1:8001/storage/ \
+    python src/main.py
+* run cltl-custom-diabetes for driving the conversation: adapt the KG repo for event storage
+- conda deactivate
+- source ./venv/bin/activate
+- CLTL_AMQP_URL=amqp://eliza:eliza123@127.0.0.1:5672/ CLTL_TENANT=tenant-a \
+    python src/main.py
+* Open the browser chatui: http://localhost:8003/chatui/static/chat.html
+
+
+
+
+
+#### THOUGHTS
+###### Replacing direct KG interaction by using the brain module.....
+
+It looks like the triples never go on the event bus. They're pushed straight to the KG. Checking _annotate_and_push to confirm.
+
+They aren't. Nothing in this app puts triples on the event bus. The only event_bus.publish call is in src/myorg/diabetes/service.py:210, and it publishes just the agent's text reply to cltl.topic.text_out. Triples are written straight to the knowledge graph from inside the conversation, with no event in between.
+
+How it flows for each utterance:
+
+1. DiabetesService._process_utterance (service.py:143) calls conversation.respond(text), which ends up in KgChatSession.say() (src/kg_chat/chat_sessions.py:529).
+2. say() calls _annotate_and_push(turn) (chat_sessions.py:682) twice: once for the human's turn (:593) and once for the agent's reply (:623).
+3. _annotate_and_push runs the LLM extractor (annotate_new_turn) and then calls _populate_ekg_from_annotations(...) (:738) with kg_address=self.kg_address.
+4. That goes to populate_ekg.py. It builds capsules with events_to_capsules.get_capsule_with_event_details_from_turn_with_activity_id and writes them with brain.capsule_event(capsule, ...) (src/cltl/events_from_chat/populate_ekg.py:176). That is a direct call to the triple store through LongTermMemory.
+
+The other write path: _push_gap_triple (chat_sessions.py:896) runs when the human answers a gap or confirmation question. It builds a synthetic annotation and pushes it the same way, through _populate_ekg_from_annotations (:944).
+
+All of this happens synchronously, before the text reply is published. The triples_pushed lists in turn_log are only a simplified view for logging; they are not sent anywhere.
+
+If you want other components to see the triples on the bus, add a publish in _annotate_and_push / _push_gap_triple. Another option is a callback hook like the existing on_new_subject that the service turns into an event.
+
+
+The original set up:
+
+Triple extraction module publishes a capsule:
+
+topic_input: cltl.topic.text_in
+topic_output: cltl.topic.triple_extraction
+
+[cltl.entity_linking]
+address: http://localhost:7200/repositories/sandbox
+log_dir: ./storage/rdf
+implementations: FaceIDLinker, NamedEntityLinker
+topic_input : cltl.topic.triple_extraction
+topic_output : cltl.topic.knowledge
+
+[cltl.brain]
+address: http://localhost:7200/repositories/sandbox
+log_dir: ./storage/rdf
+clear_brain : False
+topic_input : cltl.topic.knowledge
+topic_output : cltl.topic.brain_response
+
+Code from service.py from the old triple extraction:
+
+    def _process(self, event: Event):
+        if event.metadata.topic == self._intention_topic:
+            self._active_intentions = {intention.label for intention in event.payload.intentions}
+            logger.info("Set active intentions to %s", self._active_intentions)
+            return
+
+        if event.metadata.topic == self._scenario_topic:
+            self._update_chat(event)
+            return
+
+        if self._intentions and not (self._active_intentions.intersection(self._intentions)):
+            logger.debug("Skipped event outside intention %s, active: %s (%s)",
+                         self._intentions, self._active_intentions, event)
+            return
+
+        if not self._chat:
+            logger.warning("Received utterance outside of a chat (%s)", event)
+            return
+
+        if self._dialogue_act_topic:
+            self._dialog_aware_processor.process(event)
+        else:
+            self._process_last_utterance(event.payload.signal)
+
+    def _process_last_utterance(self, text_signal: TextSignal):
+        scenario_id = self._emissor_client.get_current_scenario_id()
+        self._extractor.analyze_in_context(self._chat)
+        response = self._utterance_to_capsules(self._extractor.utterance, text_signal)
+        if response:
+            self._event_bus.publish(self._output_topic, Event.for_payload(response))
+            logger.debug("Published %s triples for signal %s (%s): %s",
+                         len(response), text_signal.id, text_signal.text, response)
+
+    def _utterance_to_capsules(self, utterance, signal):
+        capsules = []
+        for triple in utterance.triples:
+            logger.debug("Triple input: %s", triple)
+            self._add_uri_to_triple(triple)
+            logger.debug("Triple input after adding URI: %s", triple)
+            scenario_id = signal.time.container_id
+
+            capsule = {"chat": scenario_id,
+                       "turn": signal.id,
+                       "author": self._get_author(),
+                       "utterance": utterance.transcript,
+                       "utterance_type": triple['utterance_type'],
+                       "position": "0-" + str(len(utterance.transcript)),
+                       ###
+                       "subject": triple['subject'],
+                       "predicate": triple['predicate'],
+                       "object": triple['object'],
+                       "perspective": triple["perspective"],
+                       ###
+                       "context_id": scenario_id,
+                       "timestamp": timestamp_now()
+                       }
+
+            capsules.append(capsule)
+            logger.debug("Capsule input after adding URI: %s", capsule)
+        return capsules

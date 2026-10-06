@@ -1,0 +1,53 @@
+[
+  {
+    "activity_types": ["physical_condition"],
+    "activity_qualification": ["duration", "degree"],
+    "qualification_question": {
+      "duration": "How long do you experience {activity}?",
+      "degree": "How strong do you experience {activity}?"
+    },
+    "secondary_objectives": {
+      "activity_location": "body_part",
+      "location_question":"Where do you experience {activity}?",
+      "activity_date": "date",
+      "date_question":"When do you experience {activity}?"
+    }
+  },
+  {
+    "activity_types": ["social_condition"],
+    "activity_qualification": ["duration", "degree"],
+    "qualification_question": {
+      "duration": "How long do you experience {activity}?",
+      "degree": "How strong do you experience {activity}?"
+    },
+    "secondary_objectives": {
+      "activity_date": "date",
+      "date_question":"When do you experience {activity}?"
+    }
+  },
+  {
+    "activity_types": ["mental_condition"],
+    "activity_qualification": ["duration", "degree", "reason"],
+    "qualification_question": {
+      "reason": "Why do you feel {activity}",
+      "duration": "How long do you experience {activity}?",
+      "degree": "How strong do you experience {activity}?"
+    },
+    "secondary_objectives": {
+      "activity_date": "date",
+      "date_question":"When do you experience {activity}?"
+    }
+  },
+  {
+    "activity_types": ["economic_condition"],
+    "activity_qualification": ["duration", "degree"],
+    "qualification_question": {
+      "duration": "How long is this {activity} the case?",
+      "degree": "How bad is {activity}?"
+    },
+    "secondary_objectives": {
+      "activity_date": "date",
+      "date_question":"When do you experience {activity}?"
+    }
+  }
+]

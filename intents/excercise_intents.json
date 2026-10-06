@@ -1,0 +1,13 @@
+[{
+  "activity_types": ["exercise"],
+  "activity_qualification": ["duration"],
+  "qualification_question": "how long did you {activity}?",
+  "secondary_objectives": {
+    "activity_location": "place",
+    "location_question": "Where did you {activity}?",
+    "activity_date": "date",
+    "date_question": "When did you {activity}?"
+  }
+}
+]
+

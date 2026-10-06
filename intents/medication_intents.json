@@ -1,0 +1,13 @@
+[{
+  "activity_types": ["take_medicine"],
+  "patient_type": ["medication"],
+  "patient_question": "What medication did you {activity}?",
+  "activity_date": "date",
+  "date_question": "When did you take {activity}?",
+  "secondary_objectives": {
+    "patient_qualification": "quantity",
+    "qualification_question": "How much {patient} did you take?"
+  }
+}
+]
+

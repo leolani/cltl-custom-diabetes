@@ -1,0 +1,44 @@
+# The diabetes coach as ONE TENANT of an ALREADY RUNNING cltl-apps
+# deployment (cltl-apps-restructure_monitoring). Nothing in the platform is
+# changed: this container joins the platform network and binds the tenant's
+# routing keys, like the tenant's own clients/* stacks do.
+#
+# From this module's root directory, with the platform and the tenant's
+# clients already up (see README.md):
+#
+#   export OPENAI_API_KEY=...
+#   docker compose --env-file ../cltl-apps-restructure_monitoring/config/clients.env \
+#       -f compose/diabetes.compose.yml up -d --build
+#
+# The env file only supplies CLTL_TENANT; any other way of setting it works.
+# GraphDB is expected on the host (port 7200); point CLTL_KG_ADDRESS
+# elsewhere otherwise.
+
+name: cltl-custom-diabetes-${CLTL_TENANT:?set CLTL_TENANT to the tenant this module serves, e.g. tenant-a}
+
+services:
+  diabetes:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: cltl-custom-diabetes:${CLTL_IMAGE_TAG:-latest}
+    environment:
+      CLTL_TENANT: "${CLTL_TENANT:?set CLTL_TENANT to the tenant this module serves, e.g. tenant-a}"
+      # Container-side view: `rabbitmq` is the broker's name on the platform network.
+      CLTL_AMQP_URL: ${CLTL_AMQP_URL:-amqp://eliza:eliza123@rabbitmq:5672/}
+      CLTL_KG_ADDRESS: ${CLTL_KG_ADDRESS:-http://host.docker.internal:7200/repositories/event_sandbox}
+      OPENAI_API_KEY: "${OPENAI_API_KEY:?set OPENAI_API_KEY}"
+    volumes:
+      # Only the connection overlay; [cltl.diabetes] ships in the image.
+      - ../config/custom.config.example:/cltl-custom-diabetes/config/custom.config:ro
+      - ../logs:/cltl-custom-diabetes/logs
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - cltl-platform
+    restart: "no"
+
+networks:
+  cltl-platform:
+    name: ${CLTL_SERVER_NETWORK:-cltl-platform}
+    external: true

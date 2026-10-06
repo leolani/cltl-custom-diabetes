@@ -1,0 +1,12 @@
+[{
+  "activity_types": ["sleep"],
+  "activity_qualification": ["duration"],
+  "activity_date": "date",
+  "date_question": "When did you {activity}?",
+  "qualification_question": "how long did you {activity}?",
+  "secondary_objectives": {
+    "patient_qualification": "quality",
+    "qualification_question": "How well did you {activity}?"
+  }
+}
+]
