@@ -6,7 +6,7 @@
 # Python 3.10, because emissor only installs cleanly under it.
 FROM python:3.10-slim
 
-LABEL org.opencontainers.image.source="https://github.com/leolani/cltl-kg-driven-chat"
+LABEL org.opencontainers.image.source="https://github.com/leolani/cltl-custom-diabetes"
 LABEL org.opencontainers.image.description="Knowledge graph driven diabetes lifestyle coach for a Leolani deployment"
 LABEL org.opencontainers.image.licenses="MIT"
 

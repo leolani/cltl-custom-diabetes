@@ -1,28 +1,3 @@
-#### How to run the application:
-
-* start platform and client/backbone images in Docker
-* adapt the clients/backbone/config/custom.config to laptop or pepper
-* ./run_host-server.sh from cleints/backbone: uses the venv (nstalls it if not present)
-* run the llamacpp with the VLM for object recognition (Codeing/vlm/guff):
--  llama serve -m Qwen3VL-8B-Instruct-Q4_K_M.gguf --mmproj mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf -c 8184 -ngl all --host 0.0.0.0 --port 9009
-* run cltl-custom-object-recognition: adapt the KG repo in the config for scene storage
-- conda deactivate
-- source ./venv/bin/activate
-- CLTL_AMQP_URL='amqp://eliza:eliza123@127.0.0.1:5672/' \
-CLTL_TENANT=tenant-a \
-CLTL_STORAGE_URL=http://127.0.0.1:8001/storage/ \
-    python src/main.py
-* run cltl-custom-diabetes for driving the conversation: adapt the KG repo for event storage
-- conda deactivate
-- source ./venv/bin/activate
-- CLTL_AMQP_URL=amqp://eliza:eliza123@127.0.0.1:5672/ CLTL_TENANT=tenant-a \
-    python src/main.py
-* Open the browser chatui: http://localhost:8003/chatui/static/chat.html
-
-
-
-
-
 #### THOUGHTS
 ###### Replacing direct KG interaction by using the brain module.....
 

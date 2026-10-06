@@ -1,24 +1,21 @@
 remote_type: sound
-Transfer the concept of a visual history to situation_awareness. Adapt visual_awareness to a custom tenant with api.py, container.py and service.py so that the     
-  output of the object_recognition is tracked in the visual history as a sequence of changes. Transfer the has_changed functionality from the the visual repsonder to the situation       
-  awareness.    
-  
+#### How to run the application:
 
-cltl-custom-diabetes:
-CLTL_AMQP_URL=amqp://eliza:eliza123@127.0.0.1:5672/ CLTL_TENANT=tenant-a \
-CLTL_KG_ADDRESS=http://localhost:7200/repositories/event_sandbox \
-    python src/main.py
-    
-
-cltl-custom-object-recognition
-CLTL_AMQP_URL='amqp://eliza:eliza123@127.0.0.1:5672/' \
+* start platform and client/backbone images in Docker
+* adapt the clients/backbone/config/custom.config to laptop or pepper
+* ./run_host-server.sh from cleints/backbone: uses the venv (nstalls it if not present)
+* run the llamacpp with the VLM for object recognition (Codeing/vlm/guff):
+-  llama serve -m Qwen3VL-8B-Instruct-Q4_K_M.gguf --mmproj mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf -c 8184 -ngl all --host 0.0.0.0 --port 9009
+* run cltl-custom-object-recognition: adapt the KG repo in the config for scene storage
+- conda deactivate
+- source ./venv/bin/activate
+- CLTL_AMQP_URL='amqp://eliza:eliza123@127.0.0.1:5672/' \
 CLTL_TENANT=tenant-a \
 CLTL_STORAGE_URL=http://127.0.0.1:8001/storage/ \
-    .venv/bin/python src/main.py
-
-
-./run_host_server.sh
-
-llama serve -m Qwen3VL-8B-Instruct-Q4_K_M.gguf --mmproj mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf -c 8184 -ngl all --host 0.0.0.0 --port 9009
-
-
+    python src/main.py
+* run cltl-custom-diabetes for driving the conversation: adapt the KG repo for event storage
+- conda deactivate
+- source ./venv/bin/activate
+- CLTL_AMQP_URL=amqp://eliza:eliza123@127.0.0.1:5672/ CLTL_TENANT=tenant-a \
+    python src/main.py
+* Open the browser chatui: http://localhost:8003/chatui/static/chat.html

@@ -17,7 +17,7 @@ setup(
     # the same way it ran from the notebooks/ directory in cltl-kg-driven-chat.
     packages=find_namespace_packages(include=['cltl.diabetes', 'cltl.diabetes.*'], where='src'),
     data_files=[('VERSION', ['VERSION'])],
-    url="https://github.com/leolani/cltl-kg-driven-chat",
+    url="https://github.com/leolani/cltl-custom-diabetes",
     license='MIT License',
     author='CLTL',
     description='Knowledge graph driven diabetes lifestyle coach for a Leolani deployment',
