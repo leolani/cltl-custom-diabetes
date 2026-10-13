@@ -29,12 +29,8 @@ class Conversation(abc.ABC):
 
 class ConversationFactory(abc.ABC):
     @abc.abstractmethod
-    def create(self, scenario_id: str, human: str) -> Conversation:
-        """Start a new conversation with `human` for the scenario `scenario_id`."""
+    def create(self, scenario_id: str, human: str, ltm) -> Conversation:
+        """Start a new conversation with `human` for the scenario `scenario_id`,
+        reading from and writing to the knowledge graph through `ltm`, the
+        service's one LongTermMemory."""
         raise NotImplementedError()
-
-    def add_context(self, capsule: dict) -> None:
-        """Record the context (time and place) of a scenario that just started
-        in the knowledge graph, see LongTermMemory.capsule_context. Does
-        nothing by default."""
-        pass

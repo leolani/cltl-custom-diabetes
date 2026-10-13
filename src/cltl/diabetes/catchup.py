@@ -30,6 +30,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
+from cltl.diabetes import place
 from cltl.diabetes.api import Conversation, ConversationFactory
 
 logger = logging.getLogger(__name__)
@@ -42,9 +43,11 @@ def _load_kg_chat():
 
 
 class CatchUpConversation(Conversation):
-    def __init__(self, scenario_id: str, human: str, brain, kg_address: str, intents,
+    def __init__(self, scenario_id: str, human: str, ltm, kg_address: str, intents,
                  log_dir: Path, fallback_gap_days: int, model: Optional[str],
-                 max_answer_words: Optional[int] = None):
+                 max_answer_words: Optional[int] = None,
+                 place_same_threshold: float = place.DEFAULT_SAME_THRESHOLD,
+                 place_ask_threshold: float = place.DEFAULT_ASK_THRESHOLD):
         chat_sessions, catch_up, kg_question_answerer = _load_kg_chat()
         self._chat_sessions = chat_sessions
         self._catch_up = catch_up
@@ -52,18 +55,27 @@ class CatchUpConversation(Conversation):
         self.scenario_id = scenario_id
         self.human = human
         self._log_dir = log_dir
+        # What open() asked about the place (place.ASK or place.CONFIRM), so
+        # the next utterance is taken as the answer to it; None otherwise.
+        self._place_question = None
+        self._place_decision = place.PlaceDecision(place.KNOWN)
 
         self.current_date = datetime.now()
         fallback_date = self.current_date - timedelta(days=fallback_gap_days)
         self.last_conversation_date = catch_up.find_last_conversation_date(
-            human, brain, self.current_date, fallback_date)
+            human, ltm, self.current_date, fallback_date)
         self.catch_up_topics = catch_up.find_catch_up_topics(
-            brain, self.current_date, self.last_conversation_date)
+            ltm, self.current_date, self.last_conversation_date)
         logger.info("Catch-up for %s in scenario %s: last conversation %s, topics %s",
                     human, scenario_id, self.last_conversation_date,
                     [(t["activity_type"], t["expected_count"]) for t in self.catch_up_topics])
 
         model = model or chat_sessions.DEFAULT_MODEL
+        self._model = model
+        llm = chat_sessions.openai_agent(model)
+        self._places = place.PlaceResolver(
+            ltm, human, lambda messages: chat_sessions._call_openai("working out where you are", llm, messages),
+            same_threshold=place_same_threshold, ask_threshold=place_ask_threshold)
         self.tracker = catch_up.SaturationTracker(self.catch_up_topics, human=human, model=model)
         agent_fn = catch_up.wrap_agent_fn_with_saturation_loop(
             chat_sessions.openai_agent(model), self.tracker)
@@ -84,21 +96,83 @@ class CatchUpConversation(Conversation):
             agent_fn=agent_fn,
             on_new_subject=self.tracker.record_new_activity,
             question_answerer=question_answerer,
+            brain=ltm,
+            # The chat goes into the scenario's context, shared with the
+            # perceptions of the scenario (see DiabetesService._add_context).
+            context_id=scenario_id,
         )
 
     def open(self) -> Optional[str]:
+        """The introduction, which also settles where the human is (see
+        cltl.diabetes.place): it says they are at the same place as last time,
+        asks whether they are, or asks where they are."""
+        decision = self._decide_place()
+        place_question, place_remark, fallback = None, None, "How have you been since we last spoke?"
+        if decision.kind == place.SAME:
+            self._set_place(decision.place_uri)
+            place_remark = f"that you can see they are at {decision.name} again"
+        elif decision.kind == place.CONFIRM:
+            place_question = f"whether they are at {decision.name} again"
+            fallback = f"Are you at {decision.name} again?"
+        elif decision.kind == place.ASK:
+            place_question = "where they are right now (e.g. at home, at work), since you don't know that yet"
+            fallback = "Where are you right now?"
+        self._place_question = decision.kind if place_question else None
+        self._place_decision = decision
+
         try:
-            opening = self.tracker.opening_question(self.current_date, self.last_conversation_date)
+            opening = self.tracker.opening_question(self.current_date, self.last_conversation_date,
+                                                    place_question=place_question, place_remark=place_remark)
         except self._chat_sessions.ChatTimeoutError as e:
             logger.warning("Timed out %s, opening with a plain greeting instead", e.source)
-            opening = f"Hi {self.human}, good to talk to you again! How have you been since we last spoke?"
+            opening = f"Hi {self.human}, good to talk to you again! {fallback}"
 
         self.session.open_with(opening)
 
         return opening
 
     def respond(self, utterance: str) -> Optional[str]:
+        question, self._place_question = self._place_question, None
+        if question == place.ASK:
+            self._save_named_place(lambda city: self._places.name_place(utterance, city))
+            return self._after_place_answer(utterance)
+        if question == place.CONFIRM:
+            return self._answer_confirmation(utterance)
+
         return self.session.say(utterance)
+
+    def _answer_confirmation(self, utterance: str) -> str:
+        decision = self._place_decision
+        answer = self._resolve(lambda city: self._places.resolve_confirmation(utterance, decision.name, city))
+        if answer == "SAME":
+            self._set_place(decision.place_uri)
+        elif answer:
+            self._save_named_place(lambda city: answer)
+        else:
+            # Not there, and not said where: ask once more.
+            self._place_question = place.ASK
+            self.session.record_human_turn(utterance)
+            reply = "Where are you right now, then?"
+            self.session.open_with(reply)
+            return reply
+
+        return self._after_place_answer(utterance)
+
+    def _after_place_answer(self, utterance: str) -> str:
+        """The answer about the place went to the context, not through event
+        extraction (which would take "I'm at my daughter's" for an activity);
+        the reply is the first catch-up question."""
+        self.session.record_human_turn(utterance)
+        try:
+            reply = (self.tracker.next_question(messages=self.session._messages)
+                     or self._chat_sessions.openai_agent(self._model)(self.session._messages))
+        except self._chat_sessions.ChatTimeoutError as e:
+            logger.warning("Timed out %s after the place answer", e.source)
+            reply = "Thanks! How have you been since we last spoke?"
+        # open_with() adds the agent's turn and pushes it, as for any agent turn.
+        self.session.open_with(reply)
+
+        return reply
 
     def close(self) -> None:
         if not self.session.turns:
@@ -108,6 +182,41 @@ class CatchUpConversation(Conversation):
         self._catch_up.save_intent_log(self.session, self.tracker, self.catch_up_topics,
                                        self.current_date, self.last_conversation_date,
                                        log_dir=str(self._log_dir / "intents_log"))
+
+    def _decide_place(self) -> "place.PlaceDecision":
+        try:
+            return self._places.decide(self.scenario_id)
+        except Exception:
+            logger.exception("Failed to work out the place of scenario %s", self.scenario_id)
+            return place.PlaceDecision(place.KNOWN)
+
+    def _city_name(self) -> Optional[str]:
+        return self._places.city_name(self._places.city(self._places.context_uri(self.scenario_id)))
+
+    def _resolve(self, ask) -> Optional[str]:
+        """`ask(city name)` -- an LLM call on the human's answer -- or None if it fails."""
+        try:
+            return ask(self._city_name())
+        except Exception:
+            logger.exception("Failed to understand the answer about the place in scenario %s", self.scenario_id)
+            return None
+
+    def _save_named_place(self, ask):
+        name = self._resolve(ask)
+        if not name:
+            logger.info("No place in the answer, the place of scenario %s stays unknown", self.scenario_id)
+            return
+        try:
+            self._places.save_named_place(self.scenario_id, name)
+        except Exception:
+            # The conversation goes on without it.
+            logger.exception("Failed to save the place of scenario %s", self.scenario_id)
+
+    def _set_place(self, place_uri: str):
+        try:
+            self._places.set_place(self.scenario_id, place_uri)
+        except Exception:
+            logger.exception("Failed to save the place of scenario %s", self.scenario_id)
 
     def _turns_path(self) -> Path:
         name = re.sub(r"[^A-Za-z0-9_.-]", "_", f"chat{self.session.chat}_{self.human}")
@@ -119,62 +228,59 @@ class CatchUpConversation(Conversation):
 class CatchUpConversationFactory(ConversationFactory):
     def __init__(self, kg_address: str, intents_dir: str, log_dir: str,
                  fallback_gap_days: int = 7, model: Optional[str] = None,
-                 max_answer_words: Optional[int] = None, clear_brain: bool = False):
+                 max_answer_words: Optional[int] = None,
+                 place_same_threshold: float = place.DEFAULT_SAME_THRESHOLD,
+                 place_ask_threshold: float = place.DEFAULT_ASK_THRESHOLD):
         # The kg-chat code reads the key at import time and calls sys.exit()
         # when it is missing, which would take down the service thread in the
         # middle of a conversation instead of at start-up.
         if not os.environ.get("OPENAI_API_KEY"):
             raise ValueError("OPENAI_API_KEY is not set; cltl-custom-diabetes needs it "
                              "for event extraction and reply generation")
-        if not kg_address or kg_address.startswith("$"):
-            raise ValueError(f"[cltl.diabetes] kg_address is not set ({kg_address!r}); "
-                             "set kg_server and kg_repository, or CLTL_KG_ADDRESS to the "
-                             "GraphDB repository's SPARQL endpoint")
-
         self._kg_address = kg_address
         self._intents_dir = intents_dir
         self._log_dir = Path(log_dir)
         self._fallback_gap_days = fallback_gap_days
         self._model = model
         self._max_answer_words = max_answer_words
-        self._clear_brain = clear_brain
+        self._place_same_threshold = place_same_threshold
+        self._place_ask_threshold = place_ask_threshold
 
         self._lock = threading.Lock()
-        self._brain = None
         self._intents = None
 
-    def create(self, scenario_id: str, human: str) -> Conversation:
-        brain, intents = self._resources()
-
-        return CatchUpConversation(scenario_id, human, brain, self._kg_address, intents,
+    def create(self, scenario_id: str, human: str, ltm) -> Conversation:
+        return CatchUpConversation(scenario_id, human, ltm, self._kg_address, self._load_intents(),
                                    self._log_dir, self._fallback_gap_days, self._model,
-                                   max_answer_words=self._max_answer_words)
+                                   max_answer_words=self._max_answer_words,
+                                   place_same_threshold=self._place_same_threshold,
+                                   place_ask_threshold=self._place_ask_threshold)
 
-    def add_context(self, capsule: dict) -> None:
-        brain, _ = self._resources()
-        response = brain.capsule_context(capsule)
-        logger.info("Added context %s to %s (response %s)",
-                    capsule["context_id"], self._kg_address, response.get("response"))
-
-    def _resources(self):
-        """Connect to the knowledge graph on first use, not at start-up, so the
-        module comes up even while GraphDB is not (yet) reachable. A failed
-        connection is not cached; the next conversation tries again."""
+    def _load_intents(self):
         with self._lock:
-            if self._brain is None:
-                chat_sessions, catch_up, _ = _load_kg_chat()
-                # Cleared on the first successful connection only, i.e. once
-                # per process, before anything is read or written.
-                self._brain = catch_up.connect_brain(self._kg_address,
-                                                     log_dir=str(self._log_dir / "kg_logs"),
-                                                     clear_all=self._clear_brain)
-                if self._clear_brain:
-                    logger.warning("Cleared the knowledge graph at %s (clear_brain)", self._kg_address)
+            if self._intents is None:
+                chat_sessions, _, _ = _load_kg_chat()
                 # chat_sessions imports intent_gap_finder lazily, together
                 # with the other knowledge graph dependencies.
                 intent_gap_finder = chat_sessions._load_kg_dependencies()["intent_gap_finder"]
                 self._intents = intent_gap_finder.load_intents(self._intents_dir)
-                logger.info("Connected to %s, loaded %s intents from %s",
-                            self._kg_address, len(self._intents), self._intents_dir)
+                logger.info("Loaded %s intents from %s", len(self._intents), self._intents_dir)
 
-            return self._brain, self._intents
+            return self._intents
+
+
+def connect_ltm(kg_address: str, log_dir: str, clear_brain: bool = False):
+    """The one LongTermMemory for `kg_address`, shared by the service and every
+    conversation. `clear_brain` empties the repository first."""
+    if not kg_address or kg_address.startswith("$"):
+        raise ValueError(f"[cltl.diabetes] kg_address is not set ({kg_address!r}); "
+                         "set kg_server and kg_repository, or CLTL_KG_ADDRESS to the "
+                         "GraphDB repository's SPARQL endpoint")
+
+    _, catch_up, _ = _load_kg_chat()
+    ltm = catch_up.connect_brain(kg_address, log_dir=str(Path(log_dir) / "kg_logs"), clear_all=clear_brain)
+    if clear_brain:
+        logger.warning("Cleared the knowledge graph at %s (clear_brain)", kg_address)
+    logger.info("Connected to %s", kg_address)
+
+    return ltm

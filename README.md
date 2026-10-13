@@ -154,7 +154,8 @@ The notebooks write their logs to `notebooks/{chat_logs,intents_log,kg_logs}`.
 
 ```
 src/cltl/diabetes/    this module: the bus service (service.py), its wiring
-                      (container.py), and the bridge to kg-driven-chat (catchup.py)
+                      (container.py), the bridge to kg-driven-chat (catchup.py),
+                      and where the human is (place.py)
 src/cltl/kg_chat/     chat_sessions.py, catch_up_from_kg.py  ┐
 src/cltl/             chat_from_kg, events_from_chat,         │ copied
                       gaps_from_kg                            │ from
@@ -184,6 +185,10 @@ The kg-driven-chat code is copied unchanged, with these exceptions:
 - `src/cltl/kg_chat/chat_sessions.py` has an optional `question_answerer` that
   answers the human's questions about their own record from the knowledge
   graph.
+- `src/cltl/gaps_from_kg/thought_util.py`'s `get_all_utterances` joins a chat
+  to its dated context on `n2mu:id` and looks up the actor's label outside the
+  interactions graph. The original query never matched, so the last
+  conversation was always the `fallback_gap_days` default ("a week ago").
 - Each notebook has an extra first code cell that puts `src/` on
   `sys.path`, and imports `chat_sessions` and `catch_up_from_kg` from
   `cltl.kg_chat`, because they no longer sit next to the notebooks.

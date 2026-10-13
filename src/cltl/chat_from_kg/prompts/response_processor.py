@@ -385,12 +385,13 @@ class PromptProcessor():
         content = f"Question asked: {question}\nReply: {reply}"
         return [self._instruct.get_instruct_for_confirmation_response(), {"role": "user", "content": content}]
 
-    def get_prompt_for_gap_filled_ack(self, gap: dict, value: str):
+    def get_prompt_for_gap_filled_ack(self, gap: dict, value: str, previous_replies=None):
         """Build a [instruct, user-message] prompt for a brief natural-language acknowledgement
-        after `gap` has just been filled -- confirmed or corrected -- with `value`."""
+        after `gap` has just been filled -- confirmed or corrected -- with `value`.
+        `previous_replies`, the agent's last few replies, keeps it from opening the same way."""
         subject_label = self._label_for_subject(gap)
         predicate_label = local_name(gap["predicate"])
-        content = f"{subject_label}, {predicate_label}, {value}"
+        content = f"{subject_label}, {predicate_label}, {value}" + _previous_replies_note(previous_replies)
         return [self._instruct.get_instruct_for_gap_filled_ack(), {"role": "user", "content": content}]
 
     #### Handling the human's answer to an intent_gap_finder.py-driven follow-up question, for
@@ -409,12 +410,18 @@ class PromptProcessor():
         content = f"Question asked: {question}\nReply: {reply}"
         return [self._instruct.get_instruct_for_intent_answer_response(), {"role": "user", "content": content}]
 
-    def get_prompt_for_gap_declined_ack(self, gap: dict):
+    def get_prompt_for_gap_declined_ack(self, gap: dict, previous_replies=None):
         """Build a [instruct, user-message] prompt for a brief natural-language acknowledgement
         after the human indicated (get_prompt_for_intent_answer_response()'s DECLINE) that they
         don't have/didn't do/don't know whatever `gap` was asking about -- the requirement is
         simply dropped, not asked again."""
         subject_label = self._label_for_subject(gap)
         predicate_label = local_name(gap["predicate"])
-        content = f"{subject_label}, {predicate_label}"
+        content = f"{subject_label}, {predicate_label}" + _previous_replies_note(previous_replies)
         return [self._instruct.get_instruct_for_gap_declined_ack(), {"role": "user", "content": content}]
+
+
+def _previous_replies_note(previous_replies) -> str:
+    if not previous_replies:
+        return ""
+    return "\nYour previous replies, do not open the same way:\n" + "\n".join(f"- {r}" for r in previous_replies)

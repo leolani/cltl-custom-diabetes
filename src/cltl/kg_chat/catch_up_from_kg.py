@@ -151,9 +151,10 @@ def connect_brain(kg_address: str, log_dir: str = "kg_logs", clear_all: bool = F
     populate_ekg_from_annotations() at (see events_from_chat/populate_ekg.py), just queried
     through cltl.brain's own SPARQL layer instead of kg_gap_finder.py's rdflib one. Never clears
     the graph unless `clear_all` is set (cltl.diabetes' `clear_brain` option) -- this module
-    only ever reads. Its one writer is cltl.diabetes (CatchUpConversationFactory.add_context),
-    which adds each scenario's context (time and place) through capsule_context() on this
-    same connection.
+    only ever reads. cltl.diabetes creates this connection once (catchup.connect_ltm(), from
+    DiabetesContainer) and shares it: the service adds each scenario's context through
+    capsule_context(), and every chat session pushes its turns through it
+    (populate_ekg_from_annotations(brain=...)).
 
     Also calls ensure_role_hierarchy() -- every caller of connect_brain() goes on to run
     find_last_conversation_date()/find_catch_up_topics(), both built on
@@ -521,7 +522,8 @@ class SaturationTracker:
         return remaining[0]
 
     def opening_question(self, current_date: datetime, recent_date: datetime,
-                          agent_fn=None) -> str:
+                          agent_fn=None, place_question: Optional[str] = None,
+                          place_remark: Optional[str] = None) -> str:
         """The very first agent turn, in two parts, in this order -- see this module's own
         docstring: (1) how long it's been since the last conversation, followed by a SUMMARY of
         every topic (`self.targets`, this human's own full catch-up list, not just a couple of
@@ -534,18 +536,32 @@ class SaturationTracker:
         If there's nothing left to ask about at all (e.g. every topic is already covered by data
         pushed through some other channel before this chat even starts), the message still names
         every topic recapped from last time, just without the trailing specific question.
+
+        `place_question` -- what to ask about where the human is (e.g. "where they are right
+        now"), asked after (2) instead of the topic question; no topic is marked as asked, so
+        next_question() starts with it. `place_remark` -- something to say about where they are
+        (e.g. that they are at the same place as last time), right after the greeting.
         """
         all_topics_phrase = ", ".join(t.replace("_", " ") for t in self.targets)
-        activity_type = self._select_topic()
+        activity_type = None if place_question else self._select_topic()
         specific_label = None
         if activity_type is not None:
             self._mark_asked(activity_type)
             specific_label = activity_type.replace("_", " ")
+        gap_description = _format_gap_description(current_date, recent_date)
+        gap_days = (current_date.date() - recent_date.date()).days
+        # Left to itself, the LLM rounds any gap of a few days up to "about a week".
+        gap_instruction = (
+            f" (say it exactly like that, e.g. \"{gap_description.split(',')[0]}\", "
+            f"and do not round it up to a week)" if gap_days < CATCH_UP_WINDOW_DAYS else ""
+        )
         user_prompt = (
-            f"Our last conversation was {_format_gap_description(current_date, recent_date)}. "
+            f"Our last conversation was {gap_description}. "
             + (f"Back then we talked about: {all_topics_phrase}. " if all_topics_phrase else "")
             + "Write the opening message of today's chat, in this order: (1) greet them and "
-            "mention how long it's been since you last talked, (2) in one short sentence, "
+            f"mention how long it's been since you last talked{gap_instruction}"
+            + (f", and briefly mention {place_remark}" if place_remark else "")
+            + ", (2) in one short sentence, "
             "summarize the topics you talked about last time"
             + (f" ({all_topics_phrase})" if all_topics_phrase else "")
             + (
@@ -553,6 +569,7 @@ class SaturationTracker:
                 f"share what's happened with their {specific_label} since then"
                 if specific_label else ""
             )
+            + (f", (3) THEN ask {place_question}" if place_question else "")
             + ". Keep it natural and short (2-3 sentences)."
         )
         messages = [

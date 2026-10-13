@@ -90,7 +90,7 @@ class BrainGetToKnowMore(GetToKnowMore):
         return self.get_action()
 
     def add_knowledge(self, capsule: dict):
-        self._brain.capsule_statement(capsule, reason_types=True, return_thoughts=True, create_label=True)
+        self._brain.capsule_statement(capsule, reason_types=True, return_thoughts=False, create_label=True)
         self._evaluate()
 
     def _evaluate(self):

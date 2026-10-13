@@ -455,7 +455,8 @@ class KgChatSession(ChatSession):
     def __init__(self, chat, human, kg_address, log_dir="kg_logs", date=None, agent_fn=None,
                  system_prompt=None, extractor=None, replier=None, gap_threshold=0.3,
                  gap_activity_types=DEFAULT_GAP_ACTIVITY_TYPES, clear_all=False,
-                 on_new_subject=None, question_answerer=None):
+                 on_new_subject=None, question_answerer=None, brain=None,
+                 context_id=None):
         super().__init__(chat=chat, human=human, date=date, agent_fn=agent_fn, system_prompt=system_prompt)
         deps = _load_kg_dependencies()
         self._populate_ekg_from_annotations = deps["populate_ekg_from_annotations"]
@@ -464,6 +465,15 @@ class KgChatSession(ChatSession):
 
         self.kg_address = kg_address
         self.log_dir = log_dir
+        # Optional LongTermMemory for kg_address that every push goes through. Without it
+        # (the notebooks), populate_ekg_from_annotations() creates a new one per push.
+        self.brain = brain
+        # Optional context every push goes into, e.g. the platform's scenario id, whose context
+        # (time and place) is written by whoever owns it. Without it, each chat gets a context of
+        # its own (and one per activity), written with the first push.
+        self.context_id = context_id
+        # This chat's own context only needs to go to the graph with the first push.
+        self._context_pushed = False
         # Optional callable(subject_uri, activity_type_local_name) -- called exactly once per
         # genuinely NEW activity_id (see _annotate_and_push()'s own "is_new" check), the first
         # time it's ever seen a recognized type, never again on a later turn that just adds
@@ -530,7 +540,8 @@ class KgChatSession(ChatSession):
         self._pending_triples_pushed = []
         if clear_all:
             # Wipe the graph once, up front, instead of on every incremental push below.
-            self._populate_ekg_from_annotations([], kg_address=kg_address, log_dir=log_dir, clear_all=True)
+            self._populate_ekg_from_annotations([], kg_address=kg_address, log_dir=log_dir, clear_all=True,
+                                                brain=brain)
 
     def say(self, utterance: str) -> str:
         """See ChatSession.say(). Additionally: if any OpenAI-backed step involved in producing
@@ -698,6 +709,13 @@ class KgChatSession(ChatSession):
             triples_pushed = []
         self._log_turn(turn, triples_pushed=triples_pushed)
 
+    def record_human_turn(self, utterance: str) -> None:
+        """Add a human turn to the conversation without extracting events from it, e.g. an
+        answer that the caller has already handled itself."""
+        self._messages.append({"role": "user", "content": utterance})
+        turn = self._add_turn(self.human, utterance)
+        self._log_turn(turn, triples_pushed=[])
+
     def _annotate_and_push(self, turn: dict):
         """Annotate one new turn and, if it produced anything, push it to the knowledge graph
         right away. Returns (summary, subject_uris, triples_pushed): summary is the
@@ -761,7 +779,11 @@ class KgChatSession(ChatSession):
             kg_address=self.kg_address,
             log_dir=self.log_dir,
             clear_all=False,
+            brain=self.brain,
+            add_context=self.context_id is None and not self._context_pushed,
+            context_id=self.context_id,
         )
+        self._context_pushed = True
         self.kg_pushes.append(summary)
         return summary, subject_uris, triples_pushed
 
@@ -953,11 +975,19 @@ class KgChatSession(ChatSession):
         self.annotations.append(entry)
         summary = self._populate_ekg_from_annotations(
             [[entry]], kg_address=self.kg_address, log_dir=self.log_dir, clear_all=False,
+            brain=self.brain, add_context=self.context_id is None and not self._context_pushed,
+            context_id=self.context_id,
         )
+        self._context_pushed = True
         self.kg_pushes.append(summary)
         self.last_subject_uris = [gap["subject"]]
         triples_pushed = [{"subject": activity_id, "predicate": role_name, "object": role_value}]
         return summary, triples_pushed
+
+    def _recent_agent_replies(self, count: int = 4):
+        """The agent's last `count` utterances, so an acknowledgement can avoid opening the
+        same way as the ones before it."""
+        return [m["content"] for m in self._messages if m["role"] == "assistant"][-count:]
 
     def _continue_after_ack(self, ack: str) -> str:
         """Append a natural, forward-driving follow-up after a bare acknowledgement (see
@@ -980,8 +1010,12 @@ class KgChatSession(ChatSession):
         itself is already valid and worth keeping; losing the bonus continuation on a slow request
         isn't worth discarding it or surfacing a scary timeout message for what is, from the
         human's point of view, an answer that already went through fine."""
+        # Without this, the follow-up often opens with yet another "thanks".
+        messages = self._messages + [{"role": "system", "content":
+            f"You have just said: \"{ack}\". Continue straight on from that, without "
+            f"acknowledging or thanking them again."}]
         try:
-            followup = _call_openai("continuing the conversation", self.agent_fn, self._messages)
+            followup = _call_openai("continuing the conversation", self.agent_fn, messages)
         except ChatTimeoutError:
             print("[KgChatSession] timed out generating a follow-up after the acknowledgement -- "
                   "keeping the acknowledgement alone for this turn.")
@@ -1032,7 +1066,7 @@ class KgChatSession(ChatSession):
             _, self._pending_triples_pushed = self._push_gap_triple(
                 gap, role_value="I", role_type="person", human_turn=human_turn
             )
-            ack_prompt = self.replier._processor.get_prompt_for_gap_filled_ack(gap, self.human)
+            ack_prompt = self.replier._processor.get_prompt_for_gap_filled_ack(gap, self.human, self._recent_agent_replies())
             ack = _call_openai("acknowledging your answer", self.replier.reply, ack_prompt)
             return self._continue_after_ack(ack)
 
@@ -1040,7 +1074,7 @@ class KgChatSession(ChatSession):
             _, self._pending_triples_pushed = self._push_gap_triple(
                 gap, role_value=correction, role_type="person", human_turn=human_turn
             )
-            ack_prompt = self.replier._processor.get_prompt_for_gap_filled_ack(gap, correction)
+            ack_prompt = self.replier._processor.get_prompt_for_gap_filled_ack(gap, correction, self._recent_agent_replies())
             ack = _call_openai("acknowledging your correction", self.replier.reply, ack_prompt)
             return self._continue_after_ack(ack)
 
@@ -1131,12 +1165,12 @@ class KgChatSession(ChatSession):
                 gap, role_value=value, role_type=gap.get("fill_role_type"), human_turn=human_turn,
                 role_name=gap["fill_role"],
             )
-            ack_prompt = self.replier._processor.get_prompt_for_gap_filled_ack(gap, value)
+            ack_prompt = self.replier._processor.get_prompt_for_gap_filled_ack(gap, value, self._recent_agent_replies())
             ack = _call_openai("acknowledging your answer", self.replier.reply, ack_prompt)
             return True, self._continue_after_ack(ack)
 
         if verdict == "decline":
-            ack_prompt = self.replier._processor.get_prompt_for_gap_declined_ack(gap)
+            ack_prompt = self.replier._processor.get_prompt_for_gap_declined_ack(gap, self._recent_agent_replies())
             ack = _call_openai(
                 "acknowledging that you don't have this", self.replier.reply, ack_prompt
             )
@@ -1196,7 +1230,8 @@ class KgIntentChatSession(KgChatSession):
 
     def __init__(self, chat, human, kg_address, log_dir="kg_logs", date=None, agent_fn=None,
                  system_prompt=None, extractor=None, replier=None, intents=None, intents_dir=None,
-                 clear_all=False, on_new_subject=None, question_answerer=None):
+                 clear_all=False, on_new_subject=None, question_answerer=None, brain=None,
+                 context_id=None):
         """Same parameters as KgChatSession, minus gap_threshold/gap_activity_types (not
         meaningful here -- there's no peer voting, and eligibility is decided by intent match,
         not an allow-list), plus:
@@ -1211,7 +1246,8 @@ class KgIntentChatSession(KgChatSession):
             chat=chat, human=human, kg_address=kg_address, log_dir=log_dir, date=date,
             agent_fn=agent_fn, system_prompt=system_prompt, extractor=extractor, replier=replier,
             gap_threshold=0.0, gap_activity_types=None, clear_all=clear_all,
-            on_new_subject=on_new_subject, question_answerer=question_answerer,
+            on_new_subject=on_new_subject, question_answerer=question_answerer, brain=brain,
+            context_id=context_id,
         )
         # There's no peer voting here (see the class docstring), so gap_threshold is never read
         # by anything this class actually does -- dropped, not just left at 0.0, so

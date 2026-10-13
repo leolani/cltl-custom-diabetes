@@ -35,16 +35,23 @@ class FakeConversation(Conversation):
         self.closed = True
 
 
+class FakeLtm:
+    def __init__(self):
+        self.contexts: List[dict] = []
+
+    def capsule_context(self, capsule: dict) -> dict:
+        self.contexts.append(capsule)
+        return {"response": 204, "context": capsule}
+
+
 class FakeFactory(ConversationFactory):
     def __init__(self, fail_times: int = 0):
         self.created: List[FakeConversation] = []
-        self.contexts: List[dict] = []
+        self.ltms = []
         self.fail_times = fail_times
 
-    def add_context(self, capsule: dict) -> None:
-        self.contexts.append(capsule)
-
-    def create(self, scenario_id: str, human: str) -> Conversation:
+    def create(self, scenario_id: str, human: str, ltm) -> Conversation:
+        self.ltms.append(ltm)
         if self.fail_times:
             self.fail_times -= 1
             raise ConnectionError("knowledge graph down")
@@ -67,6 +74,7 @@ class DiabetesServiceTest(unittest.TestCase):
     def setUp(self):
         self.event_bus = SynchronousEventBus()
         self.replies = Queue()
+        self.ltm = FakeLtm()
         self.event_bus.subscribe(OUTPUT_TOPIC, self.replies.put)
         self.service = None
 
@@ -76,7 +84,7 @@ class DiabetesServiceTest(unittest.TestCase):
 
     def _start(self, factory, **kwargs):
         self.service = DiabetesService(INPUT_TOPIC, OUTPUT_TOPIC, SCENARIO_TOPIC, "Jan", factory,
-                                       self.event_bus, resource_manager=None, **kwargs)
+                                       self.ltm, self.event_bus, resource_manager=None, **kwargs)
         self.service.start()
 
     def _reply_text(self):
@@ -121,23 +129,42 @@ class DiabetesServiceTest(unittest.TestCase):
         self.event_bus.publish(SCENARIO_TOPIC, _scenario(ScenarioStarted))
         self.assertRaises(Empty, lambda: self.replies.get(timeout=0.05))
 
+    def test_context_capsule_parses_location_record(self):
+        from types import SimpleNamespace
+        record = ('{"ip": "130.37.159.198", "city": "Amsterdam", "region": "North Holland", '
+                  '"country": "NL", "loc": "52.3740,4.8897"}')
+        payload = SimpleNamespace(scenario=SimpleNamespace(
+            start=None, context=SimpleNamespace(location=record, location_id="loc-1")))
+
+        capsule = DiabetesService._context_capsule("scenario-1", payload)
+
+        self.assertEqual("", capsule["place"])
+        self.assertEqual("loc-1", capsule["place_id"])
+        self.assertEqual(("Amsterdam", "North Holland", "NL"),
+                         (capsule["city"], capsule["region"], capsule["country"]))
+
     def test_scenario_start_adds_context(self):
         factory = FakeFactory()
         self._start(factory)
 
         self.event_bus.publish(SCENARIO_TOPIC, _scenario(ScenarioStarted))
-        self._wait_for(lambda: factory.contexts)
+        self._wait_for(lambda: self.ltm.contexts)
 
-        capsule = factory.contexts[0]
+        capsule = self.ltm.contexts[0]
         self.assertEqual("scenario-1", capsule["context_id"])
         self.assertEqual("Unknown", capsule["city"])
 
+        # A repeated start of the same scenario adds nothing; a new scenario
+        # gets its own context.
+        self.event_bus.publish(SCENARIO_TOPIC, _scenario(ScenarioStarted))
         self.event_bus.publish(SCENARIO_TOPIC, _scenario(ScenarioStarted, "scenario-2"))
-        # Events are processed in order: once this is answered, the second
-        # ScenarioStarted has been handled too.
+        # Events are processed in order: once this is answered, both
+        # ScenarioStarted events have been handled too.
         self.event_bus.publish(INPUT_TOPIC, _utterance("hi", "scenario-2"))
         self._reply_text()
-        self.assertEqual(1, len(factory.contexts))
+        self.assertEqual(["scenario-1", "scenario-2"], [c["context_id"] for c in self.ltm.contexts])
+        # The conversation got the service's one LongTermMemory.
+        self.assertIs(self.ltm, factory.ltms[0])
 
     def test_scenario_stop_closes_and_next_utterance_reopens(self):
         factory = FakeFactory()
@@ -198,7 +225,7 @@ class DiabetesServiceTest(unittest.TestCase):
     def test_rejects_unknown_open_on(self):
         with self.assertRaises(ValueError):
             DiabetesService(INPUT_TOPIC, OUTPUT_TOPIC, SCENARIO_TOPIC, "Jan", FakeFactory(),
-                            self.event_bus, resource_manager=None, open_on="never")
+                            self.ltm, self.event_bus, resource_manager=None, open_on="never")
 
     @staticmethod
     def _wait_for(condition, timeout=1.0):

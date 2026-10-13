@@ -3,32 +3,11 @@ remote_type: sound
 
 * start platform and client/backbone images in Docker
 * adapt the clients/backbone/config/custom.config to laptop or pepper
-* check if monitoring is on in the server/default.config:
+* adapt the image rate in tenant-a/config/default.config:
 
-[cltl.chat-ui]
-name: chat-ui
-agent_id: leolani
-external_input: True
-timeout: 0
-# Adds the Image panel beside the conversation: a file input, drag-to-draw
-# labelled rectangles, and Submit. Submitting publishes ONE ImageSignalEvent on
-# topic_image below and echoes the picture into the transcript — and publishes
-# NOTHING on topic_utterance, which is why cltl-eliza never answers a picture
-# and an image draws exactly one reply where text draws two.
-image_upload: True
-image_cache: 4
-image_max_size: 10485760
-image_types: image/png, image/jpeg, image/gif, image/webp
-# Left empty ON PURPOSE: the chat UI falls back to [cltl.backend] storage_url
-# below, which is what guarantees that the endpoint it PUTs pixels to is the
-# same one everybody else resolves `cltl-storage:` against. Setting it here
-# would create a second place for the same address to be wrong in.
-image_storage_url:
-image_upload_timeout: 30
-# The Monitoring tab: an iframe onto the page this tenant's cltl-monitoring
-# serves. A browser-reachable URL — see tenant.compose.yml, which builds it from
-# the published port. Empty leaves the tab out.
-monitoring_url: http://localhost:8005/monitoring
+cltl.backend.image]
+topic: cltl.topic.image
+rate: 0.05
 
 
 * ./run_host-server.sh from clients/backbone: uses the venv (installs it if not present)

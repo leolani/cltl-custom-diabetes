@@ -192,7 +192,9 @@ class Instruct():
         instruct = {"role": "system", "content": "You are an intelligent assistant. \
          I will give you a short fact that the person just confirmed or corrected. \
          Reply with a brief, warm acknowledgement in plain " + self._language + ", at most one \
-         short sentence (e.g. \"Got it, thanks!\"). Do not repeat the fact back in full. \
+         short sentence, that reacts to what the person said rather than a stock phrase. \
+         Vary your wording: do not start the way your previous replies started, and avoid \
+         \"Got it\" and \"thanks for letting me know\". Do not repeat the fact back in full. \
          Do not ask a new question. \
          The response should be just the acknowledgement and nothing else."
                }
@@ -239,7 +241,9 @@ class Instruct():
         instruct = {"role": "system", "content": "You are an intelligent assistant. \
          I will give you a short subject and topic that the person just indicated they don't \
          have, didn't do, or don't know. Reply with a brief, warm acknowledgement in plain " + self._language + ", \
-         at most one short sentence (e.g. \"No worries, thanks for letting me know.\"). \
+         at most one short sentence, that fits what they said rather than a stock phrase. \
+         Vary your wording: do not start the way your previous replies started, and avoid \
+         \"Got it\" and \"thanks for letting me know\". \
          Do not ask a new question about it. \
          The response should be just the acknowledgement and nothing else."
                }

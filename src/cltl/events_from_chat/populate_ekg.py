@@ -134,8 +134,8 @@ class CapsuleEncoder(json.JSONEncoder):
     def iterencode(self, obj, _one_shot=False):
         return super().iterencode(self._preprocess(obj), _one_shot)
 
-def populate_ekg_from_annotations(annotated_conversations, kg_address, log_dir, clear_all=False,
-                                   capsules_out_path=None):
+def populate_ekg_from_annotations(annotated_conversations, kg_address=None, log_dir=None, clear_all=False,
+                                   capsules_out_path=None, brain=None, add_context=True, context_id=None):
     """Push already-loaded annotation JSON (the annotation tool's export format) into a knowledge graph.
 
     :param annotated_conversations: array-of-conversations JSON, as produced by the annotation
@@ -145,14 +145,24 @@ def populate_ekg_from_annotations(annotated_conversations, kg_address, log_dir, 
     :param log_dir: directory to write step-wise graph logs to.
     :param clear_all: whether to start from an empty brain instead of appending to the existing graph.
     :param capsules_out_path: optional path to also dump the derived capsules as JSON, for debugging.
+    :param brain: an existing LongTermMemory to push to; kg_address and log_dir are then not used.
+        Without it, a new LongTermMemory is created for this call.
+    :param add_context: False skips capsule_context() for conversations whose context is already
+        in the graph, e.g. on every push after the first of a chat session.
+    :param context_id: puts the context and every event in this one context (e.g. the platform's
+        scenario id), instead of a context per conversation and one per activity.
     :return: dict summarizing how many conversations/capsules were added.
     """
-    log_dir = Path(log_dir)
-    log_dir.mkdir(parents=True, exist_ok=True)
+    if brain is None:
+        log_dir = Path(log_dir)
+        log_dir.mkdir(parents=True, exist_ok=True)
 
-    brain = LongTermMemory(address=kg_address,  # Location to save accumulated graph
-                           log_dir=log_dir,  # Location to save step-wise graphs
-                           clear_all=clear_all)
+        brain = LongTermMemory(address=kg_address,  # Location to save accumulated graph
+                               log_dir=log_dir,  # Location to save step-wise graphs
+                               clear_all=clear_all)
+    elif clear_all:
+        brain.clear_brain()
+        brain.upload_ontology()
 
     ### A scenario has a context_capsule that identifies the scenario and a list of capsules extracted for a single conversation that need to be added to the brain.
     # The context capsule contains contextual information about the scenario (e.g. location, date) and
@@ -167,8 +177,13 @@ def populate_ekg_from_annotations(annotated_conversations, kg_address, log_dir, 
     total_capsules = 0
     # Loop through the scenarios
     for (context_capsule, conversation_capsules) in tqdm(scenarios):
+        if context_id is not None:
+            context_capsule['context_id'] = context_id
+            for capsule in conversation_capsules:
+                capsule['context_id'] = context_id
         print('Conversation id', context_capsule['context_id'], 'Total number of capsules extracted for this conversation', len(conversation_capsules))        # Create context
-        brain.capsule_context(context_capsule)
+        if add_context:
+            brain.capsule_context(context_capsule)
         # Add information to the brain
         for capsule in conversation_capsules:
             print('chat', capsule['chat'], 'out of ', len(scenarios), 'turn', capsule['turn'], 'out of', len(conversation_capsules), 'turns')

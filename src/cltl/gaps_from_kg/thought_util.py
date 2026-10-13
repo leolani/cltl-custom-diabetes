@@ -483,28 +483,34 @@ def get_gaps_from_thought_response(responses):
 
 
 def get_all_utterances(target):
+    # The chat's date is on the context that has the chat as an event (the
+    # scenario's context, shared with the perceptions), or, in graphs written
+    # before that, on the context with the chat's own id (context<id>), joined
+    # on n2mu:id. The actor's label is in the instance graph, not in
+    # leolaniTalk:Interactions.
     query = "PREFIX n2mu: <http://cltl.nl/leolani/n2mu/> \
             PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>\
-            PREFIX dc: <http://purl.org/dc/elements/1.1/>\
             PREFIX grasp: <http://groundedannotationframework.org/grasp#>\
-            PREFIX prov: <http://www.w3.org/ns/prov#>\
             PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>\
             PREFIX sem: <http://semanticweb.cs.vu.nl/2009/11/sem/>\
             PREFIX time: <http://www.w3.org/TR/owl-time/#>\
             PREFIX leolaniTalk: <http://cltl.nl/leolani/talk/>\
             select ?context ?utterance ?actor ?year ?month ?day where { \
                 GRAPH leolaniTalk:Interactions { \
-                    ?context sem:hasEvent ?e .\
-                    ?context ?p ?t .\
-                    ?t time:day ?day .\
-                    ?t time:month ?month .\
-                    ?t time:year ?year .\
                     ?e rdf:type sem:Event, grasp:Chat .\
                     ?e sem:hasSubEvent ?utterance .\
                     ?utterance sem:hasActor ?actor . \
-                    ?actor rdfs:label "
+                    { ?context sem:hasEvent ?e . } UNION \
+                    { ?e n2mu:id ?chat_id . ?context n2mu:id ?context_id .\
+                      FILTER(STR(?context_id) = STR(?chat_id)) } \
+                    ?context sem:hasBeginTimeStamp ?t .\
+                    ?t time:day ?day .\
+                    ?t time:month ?month .\
+                    ?t time:year ?year .\
+                } \
+                ?actor rdfs:label "
     query += '\"' + target + '\" .'
-    query += '}}'
+    query += '}'
     return query
 
 

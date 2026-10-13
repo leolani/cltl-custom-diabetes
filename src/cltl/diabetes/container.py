@@ -4,8 +4,9 @@ from typing import Optional
 from cltl.combot.infra.container import InfraContainer
 from cltl.combot.infra.di_container import singleton
 
+from cltl.diabetes import place
 from cltl.diabetes.api import ConversationFactory
-from cltl.diabetes.catchup import CatchUpConversationFactory
+from cltl.diabetes.catchup import CatchUpConversationFactory, connect_ltm
 from cltl.diabetes.service import DiabetesService
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,10 @@ def _max_answer_words(config) -> Optional[int]:
     return DEFAULT_MAX_ANSWER_WORDS
 
 
+def _float(config, key: str, default: float) -> float:
+    return float(config.get(key)) if key in config and config.get(key) else default
+
+
 class DiabetesContainer(InfraContainer):
     """Wires the knowledge graph driven conversation into a deployment.
 
@@ -62,14 +67,25 @@ class DiabetesContainer(InfraContainer):
             fallback_gap_days=config.get_int("fallback_gap_days"),
             model=config.get("model") if "model" in config and config.get("model") else None,
             max_answer_words=_max_answer_words(config),
-            clear_brain="clear_brain" in config and config.get_boolean("clear_brain"),
+            place_same_threshold=_float(config, "place_same_threshold", place.DEFAULT_SAME_THRESHOLD),
+            place_ask_threshold=_float(config, "place_ask_threshold", place.DEFAULT_ASK_THRESHOLD),
         )
 
     @property
     @singleton
+    def diabetes_ltm(self):
+        """The one LongTermMemory for the knowledge graph, connected when the
+        container starts. `clear_brain` empties the repository first."""
+        config = self.config_manager.get_config("cltl.diabetes")
+
+        return connect_ltm(_kg_address(config), config.get("log_dir"),
+                           clear_brain="clear_brain" in config and config.get_boolean("clear_brain"))
+
+    @property
+    @singleton
     def diabetes_service(self) -> DiabetesService:
-        return DiabetesService.from_config(self.diabetes_conversation_factory, self.event_bus,
-                                           self.resource_manager, self.config_manager)
+        return DiabetesService.from_config(self.diabetes_conversation_factory, self.diabetes_ltm,
+                                           self.event_bus, self.resource_manager, self.config_manager)
 
     def start(self):
         logger.info("Start Diabetes coach")

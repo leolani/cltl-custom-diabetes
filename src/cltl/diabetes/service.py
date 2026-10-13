@@ -1,6 +1,8 @@
+import ast
+import json
 import logging
 from datetime import date, datetime
-from typing import Dict, Optional
+from typing import Dict, Optional, Set
 
 from cltl.combot.event.emissor import TextSignalEvent
 from cltl.combot.infra.config import ConfigurationManager
@@ -46,7 +48,7 @@ class DiabetesService:
     """
 
     @classmethod
-    def from_config(cls, factory: ConversationFactory, event_bus: EventBus,
+    def from_config(cls, factory: ConversationFactory, ltm, event_bus: EventBus,
                     resource_manager: ResourceManager, config_manager: ConfigurationManager):
         config = config_manager.get_config("cltl.diabetes")
 
@@ -68,11 +70,11 @@ class DiabetesService:
             logger.warning("[cltl.event.kombu] tenant is empty: this module answers EVERY tenant "
                            "on the exchange. Set CLTL_TENANT to scope it to one tenant.")
 
-        return cls(input_topic, output_topic, scenario_topic, human, factory, event_bus,
+        return cls(input_topic, output_topic, scenario_topic, human, factory, ltm, event_bus,
                    resource_manager, open_on=open_on, use_scenario_speaker=use_scenario_speaker)
 
     def __init__(self, input_topic: str, output_topic: str, scenario_topic: str, human: str,
-                 factory: ConversationFactory, event_bus: EventBus, resource_manager: ResourceManager,
+                 factory: ConversationFactory, ltm, event_bus: EventBus, resource_manager: ResourceManager,
                  open_on: str = OPEN_ON_UTTERANCE, use_scenario_speaker: bool = False):
         if open_on not in (OPEN_ON_UTTERANCE, OPEN_ON_SCENARIO):
             raise ValueError(f"[cltl.diabetes] open_on must be '{OPEN_ON_UTTERANCE}' "
@@ -88,12 +90,15 @@ class DiabetesService:
         self._use_scenario_speaker = use_scenario_speaker
 
         self._factory = factory
+        # The one LongTermMemory (cltl.brain) for the knowledge graph, shared
+        # by every conversation.
+        self._ltm = ltm
         self._event_bus = event_bus
         self._resource_manager = resource_manager
 
         self._conversations: Dict[str, Conversation] = {}
         self._speakers: Dict[str, str] = {}
-        self._context_added = False
+        self._contexts_added: Set[str] = set()
         self._topic_worker = None
 
     @property
@@ -134,8 +139,7 @@ class DiabetesService:
         event_type = getattr(event.payload, "type", None)
         if event_type == SCENARIO_STARTED:
             speaker = self._speaker_name(event.payload)
-            if not self._context_added:
-                self._add_context(scenario_id, event.payload)
+            self._add_context(scenario_id, event.payload)
             if speaker:
                 self._speakers[scenario_id] = speaker
             if self._open_on == OPEN_ON_SCENARIO and scenario_id not in self._conversations:
@@ -168,7 +172,7 @@ class DiabetesService:
     def _open(self, scenario_id: str, event: Event):
         human = self._speakers.get(scenario_id, self._human)
         try:
-            conversation = self._factory.create(scenario_id, human)
+            conversation = self._factory.create(scenario_id, human, self._ltm)
             opening = conversation.open()
         except Exception:
             # Not stored, so the next utterance tries again, e.g. once the
@@ -215,11 +219,18 @@ class DiabetesService:
                                 Event.for_scenario_payload(scenario_id, payload, source=source))
 
     def _add_context(self, scenario_id: str, payload):
-        """Once per service run, at the first scenario that starts. A failed
-        attempt is retried at the next one."""
+        """Once per scenario: its context is the one the chat and the
+        perceptions of the scenario share. A repeated ScenarioStarted for the
+        same scenario is ignored; a failed attempt is retried at the next one."""
+        if scenario_id in self._contexts_added:
+            return
+
         try:
-            self._factory.add_context(self._context_capsule(scenario_id, payload))
-            self._context_added = True
+            capsule = self._context_capsule(scenario_id, payload)
+            response = self._ltm.capsule_context(capsule)
+            self._contexts_added.add(scenario_id)
+            logger.info("Added context %s to the knowledge graph (response %s)",
+                        scenario_id, response.get("response"))
         except Exception:
             # The conversation does not depend on the context, so carry on.
             logger.exception("Failed to add the context of scenario %s to the knowledge graph", scenario_id)
@@ -231,7 +242,8 @@ class DiabetesService:
         scenario = getattr(payload, "scenario", None)
         start = getattr(scenario, "start", None)
         context = getattr(scenario, "context", None)
-        location = _field(context, "location")
+        location = _parse_location(_field(context, "location"))
+        # A location that is not a record (e.g. "Piek's office") is the place itself.
         place = location if isinstance(location, str) else _field(location, "place")
 
         return {"context_id": scenario_id,
@@ -241,6 +253,22 @@ class DiabetesService:
                 "country": _field(location, "country") or "Unknown",
                 "region": _field(location, "region") or "Unknown",
                 "city": _field(location, "city") or "Unknown"}
+
+
+def _parse_location(location):
+    """The platform sends the location as a string holding a record (ipinfo.io's:
+    ip, city, region, country, loc, ...), as JSON or as a Python dict."""
+    if not isinstance(location, str):
+        return location
+    for parse in (json.loads, ast.literal_eval):
+        try:
+            parsed = parse(location)
+        except (ValueError, SyntaxError):
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+
+    return location
 
 
 def _field(obj, name: str):
