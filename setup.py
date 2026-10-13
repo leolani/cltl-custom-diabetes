@@ -11,7 +11,7 @@ setup(
     version=version,
     package_dir={'': 'src'},
     # Only `cltl.diabetes`. The code copied from cltl-kg-driven-chat (the
-    # other packages under src/cltl, and src/kg_chat) is not packaged: it
+    # other packages under src/cltl, including cltl.kg_chat) is not packaged: it
     # imports its modules by bare name and locates its files relative to the
     # working directory, so it runs from src/ in this checkout (or the image),
     # the same way it ran from the notebooks/ directory in cltl-kg-driven-chat.

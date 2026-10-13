@@ -84,7 +84,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from chat_sessions import DEFAULT_GAP_ACTIVITY_TYPES, DEFAULT_MODEL, _call_openai, _openai_client
+from cltl.kg_chat.chat_sessions import DEFAULT_GAP_ACTIVITY_TYPES, DEFAULT_MODEL, _call_openai, _openai_client
 
 
 def _find_repo_src_dir() -> Path:
@@ -145,20 +145,25 @@ def ensure_role_hierarchy(kg_address: str) -> bool:
     return True
 
 
-def connect_brain(kg_address: str, log_dir: str = "kg_logs"):
+def connect_brain(kg_address: str, log_dir: str = "kg_logs", clear_all: bool = False):
     """One LongTermMemory brain connection to `kg_address` -- the exact same address
     chat_sessions.KgChatSession/KgIntentChatSession's own kg_address points
     populate_ekg_from_annotations() at (see events_from_chat/populate_ekg.py), just queried
     through cltl.brain's own SPARQL layer instead of kg_gap_finder.py's rdflib one. Never clears
-    the graph (clear_all=False, unconditionally) -- this module only ever reads.
+    the graph unless `clear_all` is set (cltl.diabetes' `clear_brain` option) -- this module
+    only ever reads. Its one writer is cltl.diabetes (CatchUpConversationFactory.add_context),
+    which adds each scenario's context (time and place) through capsule_context() on this
+    same connection.
 
     Also calls ensure_role_hierarchy() -- every caller of connect_brain() goes on to run
     find_last_conversation_date()/find_catch_up_topics(), both built on
-    thought_util.get_sem_relation_query(), so there's no point ever connecting without it."""
+    thought_util.get_sem_relation_query(), so there's no point ever connecting without it.
+    It runs after LongTermMemory is created, so clear_all does not wipe the role mappings."""
     deps = _load_gaps_from_kg()
     Path(log_dir).mkdir(parents=True, exist_ok=True)
+    brain = deps["LongTermMemory"](address=kg_address, log_dir=Path(log_dir), clear_all=clear_all)
     ensure_role_hierarchy(kg_address)
-    return deps["LongTermMemory"](address=kg_address, log_dir=Path(log_dir), clear_all=False)
+    return brain
 
 
 def find_last_conversation_date(human: str, brain, current_date: datetime,

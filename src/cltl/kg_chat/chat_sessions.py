@@ -10,7 +10,7 @@ Shared classes for the chat_session.ipynb / kg_chat_session.ipynb notebooks.
 KgChatSession's own dependencies (events_from_chat, chat_from_kg -- cltl.brain, rdflib,
 transformers/torch via perspective/emotion_extraction.py, and OPENAI_API_KEY read at *import*
 time) are only loaded on first use (_load_kg_dependencies(), called from KgChatSession.__init__),
-so `from chat_sessions import ChatSession` alone -- as chat_session.ipynb does -- never pays for
+so `from cltl.kg_chat.chat_sessions import ChatSession` alone -- as chat_session.ipynb does -- never pays for
 any of that.
 """
 

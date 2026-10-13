@@ -66,7 +66,7 @@ terminal `input()` loop.
   about the same size while the text inside it keeps growing.
 
 Usage (from a notebook, in place of `kg_session.run_interactive()`):
-    from chat_sessions import KgChatSession
+    from cltl.kg_chat.chat_sessions import KgChatSession
     from kg_chat_gui import run_gui
 
     kg_session = KgChatSession(chat=..., human=..., kg_address=..., ...)

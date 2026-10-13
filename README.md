@@ -16,7 +16,7 @@ next catch-up topic until every topic has had enough coverage for the period.
 
 When the human asks about their own record ("what did I eat yesterday?", "when
 did I last go for a walk?"), the agent answers from the knowledge graph instead
-(`src/kg_chat/kg_question_answerer.py`). An LLM turns the question into a query
+(`src/cltl/kg_chat/kg_question_answerer.py`). An LLM turns the question into a query
 plan: activity types, keywords and a start date. Fixed SPARQL queries fetch the
 activities the human reported. The LLM then paraphrases them as a reply, and a
 reply over `max_answer_words` is summarised. The question and its answer are
@@ -136,7 +136,7 @@ OPENAI_API_KEY=... jupyter notebook
 ```
 
 Start Jupyter from `notebooks/`. Each notebook's first code cell puts
-`src/kg_chat` and `src/` on `sys.path`, and the kg-driven-chat code finds
+`src/` on `sys.path`, and the kg-driven-chat code finds
 `src/cltl` and `intents/` by walking up from the working directory. The
 GraphDB repository is the `KG_ADDRESS` set in each notebook.
 
@@ -155,13 +155,13 @@ The notebooks write their logs to `notebooks/{chat_logs,intents_log,kg_logs}`.
 ```
 src/cltl/diabetes/    this module: the bus service (service.py), its wiring
                       (container.py), and the bridge to kg-driven-chat (catchup.py)
-src/kg_chat/          chat_sessions.py, catch_up_from_kg.py  ┐
+src/cltl/kg_chat/     chat_sessions.py, catch_up_from_kg.py  ┐
 src/cltl/             chat_from_kg, events_from_chat,         │ copied
                       gaps_from_kg                            │ from
 intents/              *_intents.json                          │ cltl-kg-driven-chat
 notebooks/            the notebooks and kg_chat_gui.py        │
 doc/                  slides on the KG-driven chat agent      ┘
-src/kg_chat/          kg_question_answerer.py: answers questions from the KG
+src/cltl/kg_chat/     kg_question_answerer.py: answers questions from the KG
 src/cltl/commons/     copied from cltl-combot main, see below
 config/               default.config (module settings), custom.config(.example)
                       (broker and tenant), logging.config
@@ -178,12 +178,15 @@ replaces the one from cltl-combot. Remove it once both branches agree.
 
 The kg-driven-chat code is copied unchanged, with these exceptions:
 
-- `src/kg_chat/chat_sessions.py` has an optional `question_answerer` that
+- `chat_sessions.py`, `catch_up_from_kg.py` and `kg_question_answerer.py`
+  form the package `cltl.kg_chat` in `src/cltl/kg_chat`, so they import each
+  other as `cltl.kg_chat.chat_sessions` etc. instead of by bare name.
+- `src/cltl/kg_chat/chat_sessions.py` has an optional `question_answerer` that
   answers the human's questions about their own record from the knowledge
   graph.
-- Each notebook has an extra first code cell that puts `src/kg_chat` and
-  `src/` on `sys.path`, because `chat_sessions.py` and `catch_up_from_kg.py`
-  no longer sit next to the notebooks.
+- Each notebook has an extra first code cell that puts `src/` on
+  `sys.path`, and imports `chat_sessions` and `catch_up_from_kg` from
+  `cltl.kg_chat`, because they no longer sit next to the notebooks.
 - `kg_intent_chat.ipynb` and `kg_catchup_intent_chat.ipynb` pass a
   `KgQuestionAnswerer` to the session, so a question such as "what did I
   drink?" is answered from the knowledge graph. Without it, the question is
@@ -193,17 +196,18 @@ The kg-driven-chat code is copied unchanged, with these exceptions:
 The notebooks' run logs (`chat_logs/`, `intents_log/`, `kg_logs/`) were not
 copied.
 
-To pick up changes from that repository, copy it again. Keep `diabetes` and
-`commons` out of the `--delete`, and merge `chat_sessions.py` by hand instead of
-overwriting it:
+To pick up changes from that repository, copy it again. Keep `diabetes`,
+`commons` and `kg_chat` out of the `--delete`, merge `chat_sessions.py` by hand
+instead of overwriting it, and change the bare `from chat_sessions import` in
+a fresh `catch_up_from_kg.py` and in the notebooks to `cltl.kg_chat`:
 
 ```bash
 K=../../cltl-kg-driven-chat
 rsync -a --delete --exclude __pycache__ --exclude .DS_Store \
-    --exclude /diabetes/ --exclude /commons/ $K/src/cltl/ src/cltl/
-cp $K/notebooks/catch_up_from_kg.py src/kg_chat/
+    --exclude /diabetes/ --exclude /commons/ --exclude /kg_chat/ $K/src/cltl/ src/cltl/
+cp $K/notebooks/catch_up_from_kg.py src/cltl/kg_chat/
 cp $K/notebooks/*.ipynb $K/notebooks/kg_chat_gui.py $K/notebooks/diabetes2Jan.png notebooks/
-diff $K/notebooks/chat_sessions.py src/kg_chat/chat_sessions.py
+diff $K/notebooks/chat_sessions.py src/cltl/kg_chat/chat_sessions.py
 rsync -a --delete --exclude .ipynb_checkpoints $K/intents/ intents/
 cp $K/doc/*.pdf $K/doc/*.html $K/doc/*.pptx doc/
 ```

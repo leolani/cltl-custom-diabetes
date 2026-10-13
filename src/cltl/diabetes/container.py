@@ -62,6 +62,7 @@ class DiabetesContainer(InfraContainer):
             fallback_gap_days=config.get_int("fallback_gap_days"),
             model=config.get("model") if "model" in config and config.get("model") else None,
             max_answer_words=_max_answer_words(config),
+            clear_brain="clear_brain" in config and config.get_boolean("clear_brain"),
         )
 
     @property

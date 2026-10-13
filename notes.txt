@@ -7,7 +7,7 @@ They aren't. Nothing in this app puts triples on the event bus. The only event_b
 
 How it flows for each utterance:
 
-1. DiabetesService._process_utterance (service.py:143) calls conversation.respond(text), which ends up in KgChatSession.say() (src/kg_chat/chat_sessions.py:529).
+1. DiabetesService._process_utterance (service.py:143) calls conversation.respond(text), which ends up in KgChatSession.say() (src/cltl/kg_chat/chat_sessions.py:529).
 2. say() calls _annotate_and_push(turn) (chat_sessions.py:682) twice: once for the human's turn (:593) and once for the agent's reply (:623).
 3. _annotate_and_push runs the LLM extractor (annotate_new_turn) and then calls _populate_ekg_from_annotations(...) (:738) with kg_address=self.kg_address.
 4. That goes to populate_ekg.py. It builds capsules with events_to_capsules.get_capsule_with_event_details_from_turn_with_activity_id and writes them with brain.capsule_event(capsule, ...) (src/cltl/events_from_chat/populate_ekg.py:176). That is a direct call to the triple store through LongTermMemory.

@@ -4,10 +4,10 @@ import sys
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src" / "kg_chat"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-import kg_question_answerer
-from kg_question_answerer import KgQuestionAnswerer, LOOKUP_FAILED_REPLY, QueryPlan, looks_like_question
+import cltl.kg_chat.kg_question_answerer as kg_question_answerer
+from cltl.kg_chat.kg_question_answerer import KgQuestionAnswerer, LOOKUP_FAILED_REPLY, QueryPlan, looks_like_question
 
 N2MU = "http://cltl.nl/leolani/n2mu/"
 WORLD = "http://cltl.nl/leolani/world/"

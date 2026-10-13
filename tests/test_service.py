@@ -38,7 +38,11 @@ class FakeConversation(Conversation):
 class FakeFactory(ConversationFactory):
     def __init__(self, fail_times: int = 0):
         self.created: List[FakeConversation] = []
+        self.contexts: List[dict] = []
         self.fail_times = fail_times
+
+    def add_context(self, capsule: dict) -> None:
+        self.contexts.append(capsule)
 
     def create(self, scenario_id: str, human: str) -> Conversation:
         if self.fail_times:
@@ -116,6 +120,24 @@ class DiabetesServiceTest(unittest.TestCase):
 
         self.event_bus.publish(SCENARIO_TOPIC, _scenario(ScenarioStarted))
         self.assertRaises(Empty, lambda: self.replies.get(timeout=0.05))
+
+    def test_scenario_start_adds_context(self):
+        factory = FakeFactory()
+        self._start(factory)
+
+        self.event_bus.publish(SCENARIO_TOPIC, _scenario(ScenarioStarted))
+        self._wait_for(lambda: factory.contexts)
+
+        capsule = factory.contexts[0]
+        self.assertEqual("scenario-1", capsule["context_id"])
+        self.assertEqual("Unknown", capsule["city"])
+
+        self.event_bus.publish(SCENARIO_TOPIC, _scenario(ScenarioStarted, "scenario-2"))
+        # Events are processed in order: once this is answered, the second
+        # ScenarioStarted has been handled too.
+        self.event_bus.publish(INPUT_TOPIC, _utterance("hi", "scenario-2"))
+        self._reply_text()
+        self.assertEqual(1, len(factory.contexts))
 
     def test_scenario_stop_closes_and_next_utterance_reopens(self):
         factory = FakeFactory()

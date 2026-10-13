@@ -14,7 +14,7 @@ minus its GUI:
   4. A question about the human's own record ("what did I eat yesterday?") is
      answered from the knowledge graph instead (kg_question_answerer).
 
-The code doing the actual work lives unchanged in src/kg_chat (copied from
+The code doing the actual work lives in src/cltl/kg_chat (copied from
 cltl-kg-driven-chat/notebooks) and src/cltl/{chat_from_kg,events_from_chat,
 gaps_from_kg} (copied from cltl-kg-driven-chat/src). It locates its own
 src/cltl and intents/ directories by walking up from the working directory,
@@ -24,7 +24,6 @@ requirement src/main.py already has for config/.
 import logging
 import os
 import re
-import sys
 import threading
 import time
 from datetime import datetime, timedelta
@@ -35,18 +34,9 @@ from cltl.diabetes.api import Conversation, ConversationFactory
 
 logger = logging.getLogger(__name__)
 
-# src/kg_chat holds chat_sessions.py and catch_up_from_kg.py, which import each
-# other by bare module name, as they did in the notebooks/ directory they were
-# copied from.
-_KG_CHAT_DIR = Path(__file__).resolve().parents[2] / "kg_chat"
-
-
 def _load_kg_chat():
-    if str(_KG_CHAT_DIR) not in sys.path:
-        sys.path.insert(0, str(_KG_CHAT_DIR))
-    import chat_sessions
-    import catch_up_from_kg
-    import kg_question_answerer
+    # Imported on first use: chat_sessions reads OPENAI_API_KEY at import time.
+    from cltl.kg_chat import catch_up_from_kg, chat_sessions, kg_question_answerer
 
     return chat_sessions, catch_up_from_kg, kg_question_answerer
 
@@ -129,7 +119,7 @@ class CatchUpConversation(Conversation):
 class CatchUpConversationFactory(ConversationFactory):
     def __init__(self, kg_address: str, intents_dir: str, log_dir: str,
                  fallback_gap_days: int = 7, model: Optional[str] = None,
-                 max_answer_words: Optional[int] = None):
+                 max_answer_words: Optional[int] = None, clear_brain: bool = False):
         # The kg-chat code reads the key at import time and calls sys.exit()
         # when it is missing, which would take down the service thread in the
         # middle of a conversation instead of at start-up.
@@ -147,6 +137,7 @@ class CatchUpConversationFactory(ConversationFactory):
         self._fallback_gap_days = fallback_gap_days
         self._model = model
         self._max_answer_words = max_answer_words
+        self._clear_brain = clear_brain
 
         self._lock = threading.Lock()
         self._brain = None
@@ -159,6 +150,12 @@ class CatchUpConversationFactory(ConversationFactory):
                                    self._log_dir, self._fallback_gap_days, self._model,
                                    max_answer_words=self._max_answer_words)
 
+    def add_context(self, capsule: dict) -> None:
+        brain, _ = self._resources()
+        response = brain.capsule_context(capsule)
+        logger.info("Added context %s to %s (response %s)",
+                    capsule["context_id"], self._kg_address, response.get("response"))
+
     def _resources(self):
         """Connect to the knowledge graph on first use, not at start-up, so the
         module comes up even while GraphDB is not (yet) reachable. A failed
@@ -166,8 +163,13 @@ class CatchUpConversationFactory(ConversationFactory):
         with self._lock:
             if self._brain is None:
                 chat_sessions, catch_up, _ = _load_kg_chat()
+                # Cleared on the first successful connection only, i.e. once
+                # per process, before anything is read or written.
                 self._brain = catch_up.connect_brain(self._kg_address,
-                                                     log_dir=str(self._log_dir / "kg_logs"))
+                                                     log_dir=str(self._log_dir / "kg_logs"),
+                                                     clear_all=self._clear_brain)
+                if self._clear_brain:
+                    logger.warning("Cleared the knowledge graph at %s (clear_brain)", self._kg_address)
                 # chat_sessions imports intent_gap_finder lazily, together
                 # with the other knowledge graph dependencies.
                 intent_gap_finder = chat_sessions._load_kg_dependencies()["intent_gap_finder"]

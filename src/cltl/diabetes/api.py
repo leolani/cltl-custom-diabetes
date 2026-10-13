@@ -32,3 +32,9 @@ class ConversationFactory(abc.ABC):
     def create(self, scenario_id: str, human: str) -> Conversation:
         """Start a new conversation with `human` for the scenario `scenario_id`."""
         raise NotImplementedError()
+
+    def add_context(self, capsule: dict) -> None:
+        """Record the context (time and place) of a scenario that just started
+        in the knowledge graph, see LongTermMemory.capsule_context. Does
+        nothing by default."""
+        pass

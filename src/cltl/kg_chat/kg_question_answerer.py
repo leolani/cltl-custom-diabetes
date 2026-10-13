@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, Dict, List, Optional
 
-from chat_sessions import DEFAULT_MODEL, _call_openai, _openai_client
+from cltl.kg_chat.chat_sessions import DEFAULT_MODEL, _call_openai, _openai_client
 
 logger = logging.getLogger(__name__)
 
@@ -453,7 +453,7 @@ class KgQuestionAnswerer:
     # ------------------------------------------------------------------ #
 
     def _endpoint_query(self, query: str) -> List[Dict]:
-        from chat_sessions import _load_kg_dependencies
+        from cltl.kg_chat.chat_sessions import _load_kg_dependencies
 
         kg_gap_finder = _load_kg_dependencies()["kg_gap_finder"]
         if self._graph is None:

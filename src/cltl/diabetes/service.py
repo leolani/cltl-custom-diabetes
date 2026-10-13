@@ -1,4 +1,5 @@
 import logging
+from datetime import date, datetime
 from typing import Dict, Optional
 
 from cltl.combot.event.emissor import TextSignalEvent
@@ -92,6 +93,7 @@ class DiabetesService:
 
         self._conversations: Dict[str, Conversation] = {}
         self._speakers: Dict[str, str] = {}
+        self._context_added = False
         self._topic_worker = None
 
     @property
@@ -132,6 +134,8 @@ class DiabetesService:
         event_type = getattr(event.payload, "type", None)
         if event_type == SCENARIO_STARTED:
             speaker = self._speaker_name(event.payload)
+            if not self._context_added:
+                self._add_context(scenario_id, event.payload)
             if speaker:
                 self._speakers[scenario_id] = speaker
             if self._open_on == OPEN_ON_SCENARIO and scenario_id not in self._conversations:
@@ -209,3 +213,40 @@ class DiabetesService:
         # scenario id, which a scenario event does not carry in its metadata.
         self._event_bus.publish(self._output_topic,
                                 Event.for_scenario_payload(scenario_id, payload, source=source))
+
+    def _add_context(self, scenario_id: str, payload):
+        """Once per service run, at the first scenario that starts. A failed
+        attempt is retried at the next one."""
+        try:
+            self._factory.add_context(self._context_capsule(scenario_id, payload))
+            self._context_added = True
+        except Exception:
+            # The conversation does not depend on the context, so carry on.
+            logger.exception("Failed to add the context of scenario %s to the knowledge graph", scenario_id)
+
+    @staticmethod
+    def _context_capsule(scenario_id: str, payload) -> dict:
+        """The capsule for LongTermMemory.capsule_context from the scenario's
+        start time and the location in its context, if any."""
+        scenario = getattr(payload, "scenario", None)
+        start = getattr(scenario, "start", None)
+        context = getattr(scenario, "context", None)
+        location = _field(context, "location")
+        place = location if isinstance(location, str) else _field(location, "place")
+
+        return {"context_id": scenario_id,
+                "date": datetime.fromtimestamp(start / 1000).date() if start else date.today(),
+                "place": place or "",
+                "place_id": _field(context, "location_id"),
+                "country": _field(location, "country") or "Unknown",
+                "region": _field(location, "region") or "Unknown",
+                "city": _field(location, "city") or "Unknown"}
+
+
+def _field(obj, name: str):
+    """A field of a dict or an object; deserialized events can be either."""
+    if obj is None or isinstance(obj, str):
+        return None
+    if isinstance(obj, dict):
+        return obj.get(name)
+    return getattr(obj, name, None)
