@@ -58,6 +58,9 @@ terminal `input()` loop.
   argument, adjustable in the panel's **"Look back"** box), with what this
   chat added outlined, drawn to the panel's width and scrollable. It is redrawn after every reply
   and when the panel is resized, for as long as it is shown; **"Graph"** swaps the diagram back.
+  Hovering over an activity or condition shows what it is and when it was the case; clicking it
+  opens a window with its time roles, the utterances it was mentioned in and its roles, fetched
+  from the KG, and an "Open in GraphDB" button.
 - Two independent font-size sliders, both starting at `DEFAULT_FONT_SIZE` (16pt): **"Text size"**
   (always shown) scales the transcript/entry/buttons/status line together -- built on named
   `tkinter.font.Font` objects (`self.chat_font`/`chat_font_bold`/`chat_font_italic`) that every
@@ -488,6 +491,9 @@ class ChatWindow:
         self._timeline_width = None     # the canvas width it was drawn for, in pixels
         self._timeline_resize_job = None
         self._sash_before_timeline = None  # where the sash was before the timeline widened the panel
+        self._timeline_regions = []     # [(entry, (x0, y0, x1, y1)), ...] in image pixels, see _draw_timeline()
+        self._timeline_tooltip = None   # the hover tooltip's Toplevel, see _show_timeline_tooltip()
+        self._timeline_hovered = None   # the entry under the mouse
 
         self.root = tk.Tk()
         self.root.title(f"Leolani KG Chat — {session.human} ({session.date})")
@@ -878,6 +884,9 @@ class ChatWindow:
         self.timeline_canvas.pack(side="left", fill="both", expand=True)
         self.timeline_canvas.bind("<Configure>", self._on_timeline_resize)
         self.timeline_canvas.bind("<MouseWheel>", self._on_timeline_scroll)
+        self.timeline_canvas.bind("<Motion>", self._on_timeline_motion)
+        self.timeline_canvas.bind("<Leave>", lambda event: self._set_timeline_hover(None))
+        self.timeline_canvas.bind("<Button-1>", self._on_timeline_click)
 
         self.graph_status_label = tk.Label(
             graph_frame, text="", font=("Helvetica", 9, "italic"), fg="#888888", anchor="w"
@@ -1229,11 +1238,13 @@ class ChatWindow:
     def _draw_timeline(self):
         """Draw the cached entries at the timeline canvas's current width. Runs on the main
         thread: matplotlib's pyplot isn't thread-safe. The figure is rendered to a PNG, shown as
-        a tk.PhotoImage, and closed right away, so it never also turns up in the notebook."""
+        a tk.PhotoImage, and closed right away, so it never also turns up in the notebook. Where
+        each mark landed in the image (mark_regions()) is kept for hovering and clicking."""
         if self._timeline_entries is None:
             return
         import matplotlib.pyplot as plt
-        from cltl.plots.patient_timeline import plot_patient_timeline
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+        from cltl.plots.patient_timeline import mark_regions, plot_patient_timeline
 
         width = max(self.timeline_canvas.winfo_width(), 1)
         fig = plot_patient_timeline(
@@ -1242,17 +1253,74 @@ class ChatWindow:
             highlight_chat=getattr(self.session, "chat", None),
             width=max(width / TIMELINE_DPI, TIMELINE_MIN_WIDTH_INCHES),
         )
+        plt.close(fig)
+        # Drawn on an Agg canvas of its own at the resolution shown, so the regions measured
+        # after drawing match the pixels of the PNG exactly.
+        fig.set_dpi(TIMELINE_DPI)
+        agg = FigureCanvasAgg(fig)
+        agg.draw()
+        self._timeline_regions = mark_regions(fig, agg.get_renderer())
         png = io.BytesIO()
-        try:
-            fig.savefig(png, format="png", dpi=TIMELINE_DPI)
-        finally:
-            plt.close(fig)
+        agg.print_png(png)
+        self._set_timeline_hover(None)
         self._timeline_image = tk.PhotoImage(data=base64.b64encode(png.getvalue()))
         self._timeline_width = width
         self.timeline_canvas.delete("all")
         self.timeline_canvas.create_image(0, 0, anchor="nw", image=self._timeline_image)
         self.timeline_canvas.configure(scrollregion=(0, 0, self._timeline_image.width(),
                                                      self._timeline_image.height()))
+
+    def _timeline_entry_at(self, event):
+        """The entry whose mark is under the mouse, or None; where marks overlap (a dot on a
+        bar), the smallest one, which is the one drawn on top."""
+        x, y = self.timeline_canvas.canvasx(event.x), self.timeline_canvas.canvasy(event.y)
+        hits = [(entry, box) for entry, box in self._timeline_regions
+                if box[0] <= x <= box[2] and box[1] <= y <= box[3]]
+        if not hits:
+            return None
+        return min(hits, key=lambda hit: (hit[1][2] - hit[1][0]) * (hit[1][3] - hit[1][1]))[0]
+
+    def _on_timeline_motion(self, event):
+        entry = self._timeline_entry_at(event)
+        self._set_timeline_hover(entry)
+        if entry is not None:
+            self._show_timeline_tooltip(entry, event.x_root, event.y_root)
+
+    def _set_timeline_hover(self, entry):
+        """Outline the mark of `entry` (None: nothing) and show the hand cursor over it; hides
+        the tooltip when the mouse leaves a mark."""
+        if entry is self._timeline_hovered:
+            return
+        self._timeline_hovered = entry
+        self.timeline_canvas.delete("hover")
+        if entry is None:
+            self.timeline_canvas.configure(cursor="")
+            if self._timeline_tooltip is not None:
+                self._timeline_tooltip.destroy()
+                self._timeline_tooltip = None
+            return
+        box = next(box for e, box in self._timeline_regions if e is entry)
+        self.timeline_canvas.create_rectangle(*box, outline=GRAPH_NODE_OUTLINE, width=1, tags="hover")
+        self.timeline_canvas.configure(cursor="hand2")
+
+    def _show_timeline_tooltip(self, entry, x_root, y_root):
+        """A small borderless window next to the mouse, describing `entry`."""
+        from cltl.plots.patient_timeline import describe_entry
+
+        if self._timeline_tooltip is None:
+            self._timeline_tooltip = tk.Toplevel(self.root)
+            self._timeline_tooltip.wm_overrideredirect(True)
+            tk.Label(self._timeline_tooltip, justify="left", font=("Helvetica", 11), background="#fcfcfb",
+                     foreground="#0b0b0b", relief="solid", borderwidth=1, padx=8, pady=6).pack()
+        label = self._timeline_tooltip.winfo_children()[0]
+        label.configure(text=describe_entry(entry) + "\n(click for details)")
+        self._timeline_tooltip.wm_geometry(f"+{x_root + 14}+{y_root + 12}")
+
+    def _on_timeline_click(self, event):
+        entry = self._timeline_entry_at(event)
+        if entry is not None:
+            self._set_timeline_hover(None)
+            TimelineEntryWindow(self, entry)
 
     @staticmethod
     def _timeline_period_label(days):
@@ -1378,6 +1446,102 @@ class ChatWindow:
             # an externally driven loop). Closing here too means the window is always torn down
             # and the transcript always saved, exactly once (see _on_close()'s guard).
             self._on_close()
+
+
+def fetch_mentions(kg_address, subject_uri, timeout=SPARQL_TIMEOUT):
+    """[(said, speaker, text), ...]: every utterance `subject_uri` was extracted from
+    (gaf:denotedIn), oldest first -- `said` its timestamp as text (or ""), `speaker` the local
+    name of who said it (or "")."""
+    query = f"""
+        PREFIX gaf: <http://groundedannotationframework.org/gaf#>
+        PREFIX grasp: <http://groundedannotationframework.org/grasp#>
+        PREFIX sem: <http://semanticweb.cs.vu.nl/2009/11/sem/>
+        PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+        SELECT DISTINCT ?text ?speaker ?said WHERE {{
+            <{subject_uri}> gaf:denotedIn ?utterance .
+            ?utterance rdf:value ?text .
+            OPTIONAL {{ ?utterance grasp:wasAttributedTo ?speaker . }}
+            OPTIONAL {{ ?utterance sem:hasBeginTimeStamp ?said . FILTER(isLiteral(?said)) }}
+        }} ORDER BY ?said
+    """
+    rows = SparqlEndpoint(kg_address, timeout=timeout)._submit_query(query)
+    return [(row.get("said", {}).get("value", ""), _local_name(row["speaker"]["value"]) if "speaker" in row else "",
+             row["text"]["value"]) for row in rows]
+
+
+class TimelineEntryWindow:
+    """The details of one timeline entry, opened by clicking its mark: what it is and when it was
+    the case (describe_entry()), its n2mu:time/* roles, then -- fetched on a background thread --
+    the utterances it was mentioned in and its other n2mu roles (agent, patient, location, ...),
+    with a button for GraphDB's own view of it."""
+
+    def __init__(self, chat_window, entry):
+        from cltl.plots.patient_timeline import describe_entry
+
+        self.chat_window = chat_window
+        self.entry = entry
+        self.window = tk.Toplevel(chat_window.root)
+        self.window.title(f"{entry['type'].replace('_', ' ')}: {entry['label'] or _local_name(entry['id'])}")
+        self.window.geometry("560x440")
+
+        self.text = scrolledtext.ScrolledText(self.window, wrap="word", font=("Helvetica", 12), padx=8, pady=8)
+        self.text.pack(fill="both", expand=True, padx=8, pady=(8, 0))
+        self.text.tag_config("heading", font=("Helvetica", 12, "bold"))
+        self.text.tag_config("muted", foreground="#52514e")
+
+        self._section("", describe_entry(entry))
+        times = "\n".join(f"{role}: {', '.join(d.strftime('%Y-%m-%d') for d in dates)}"
+                          for role, dates in entry.get("times", {}).items())
+        self._section("Time roles", times or "none that is a date")
+        self._section("Activity", entry["id"], "muted")
+        self._mentions_mark = self._section("Mentioned in", "loading…", "muted")
+
+        buttons = tk.Frame(self.window)
+        buttons.pack(fill="x", padx=8, pady=8)
+        tk.Button(buttons, text="Open in GraphDB ↗",
+                  command=lambda: chat_window._open_in_browser(entry["id"])).pack(side="left")
+        tk.Button(buttons, text="Close", command=self.window.destroy).pack(side="right")
+        self.text.configure(state="disabled")
+
+        threading.Thread(target=self._fetch, daemon=True).start()
+
+    def _section(self, heading, body, tag=None):
+        """Append a section; returns a mark at its body, for _show_details() to replace."""
+        if heading:
+            self.text.insert("end", heading + "\n", "heading")
+        mark = f"body{self.text.index('end')}"
+        self.text.mark_set(mark, "end-1c")
+        self.text.mark_gravity(mark, "left")
+        self.text.insert("end", body + "\n\n", tag or ())
+        return mark
+
+    def _fetch(self):
+        kg_address = self.chat_window.session.kg_address
+        try:
+            details = (fetch_mentions(kg_address, self.entry["id"]), fetch_triples(kg_address, self.entry["id"]), None)
+        except Exception as exc:
+            details = ([], [], exc)
+        self.chat_window._schedule(self._show_details, *details)
+
+    def _show_details(self, mentions, triples, error):
+        if not self.window.winfo_exists():
+            return
+        if error is not None:
+            body = f"couldn't fetch the details: {error}"
+        else:
+            # One line per utterance: the same one can be on record more than once, with
+            # timestamps a few microseconds apart, and a reply can span several lines.
+            lines = list(dict.fromkeys(f"{said[:16]}  {speaker or '?'}: {' '.join(text.split())}"
+                                       for said, speaker, text in mentions))
+            roles = [f"{_local_name(p)}: {_local_name(o) if '://' in o else o}" for p, o in triples
+                     if p.startswith(N2MU_NAMESPACE) and not p.startswith(N2MU_NAMESPACE + "time/")]
+            body = "\n".join(lines) or "no utterance on record"
+            if roles:
+                body += "\n\nRoles\n" + "\n".join(roles)
+        self.text.configure(state="normal")
+        self.text.delete(self._mentions_mark, f"{self._mentions_mark} lineend")
+        self.text.insert(self._mentions_mark, body)
+        self.text.configure(state="disabled")
 
 
 def run_gui(session, quit_words=DEFAULT_QUIT_WORDS, save_dir=DEFAULT_SAVE_DIR,
