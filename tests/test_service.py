@@ -8,12 +8,14 @@ from cltl.combot.infra.event.memory import SynchronousEventBus
 from cltl.combot.infra.time_util import timestamp_now
 from emissor.representation.scenario import Modality, Scenario, TextSignal
 
-from cltl.diabetes.api import Conversation, ConversationFactory
+from cltl.diabetes.api import Conversation, ConversationFactory, Reply
 from cltl.diabetes.service import DiabetesService, ERROR_REPLY
 
 INPUT_TOPIC = "inputTopic"
 OUTPUT_TOPIC = "outputTopic"
 SCENARIO_TOPIC = "scenarioTopic"
+GRAPH_TOPIC = "graphTopic"
+GRAPH_URI = "http://localhost:7200/graphs-visualizations?uri=walk&role=context&repositoryId=repo"
 
 
 class FakeConversation(Conversation):
@@ -25,11 +27,13 @@ class FakeConversation(Conversation):
     def open(self) -> Optional[str]:
         return f"Hi {self.human}, it has been 3 days."
 
-    def respond(self, utterance: str) -> Optional[str]:
+    def respond(self, utterance: str) -> Reply:
         if utterance == "boom":
             raise RuntimeError("boom")
         self.heard.append(utterance)
-        return f"About {utterance}?"
+        # Only an utterance reporting something adds triples to visualise.
+        graph_uri = GRAPH_URI if "walk" in utterance else None
+        return Reply(f"About {utterance}?", graph_uri)
 
     def close(self) -> None:
         self.closed = True
@@ -76,6 +80,8 @@ class DiabetesServiceTest(unittest.TestCase):
         self.replies = Queue()
         self.ltm = FakeLtm()
         self.event_bus.subscribe(OUTPUT_TOPIC, self.replies.put)
+        self.graph_uris = Queue()
+        self.event_bus.subscribe(GRAPH_TOPIC, self.graph_uris.put)
         self.service = None
 
     def tearDown(self):
@@ -101,6 +107,32 @@ class DiabetesServiceTest(unittest.TestCase):
         self.event_bus.publish(INPUT_TOPIC, _utterance("I went for a walk"))
         self.assertEqual("About I went for a walk?", self._reply_text())
         self.assertEqual(1, len(factory.created))
+
+    def test_graph_uri_of_extracted_triples_is_published(self):
+        self._start(FakeFactory(), graph_topic=GRAPH_TOPIC)
+
+        self.event_bus.publish(INPUT_TOPIC, _utterance("yes"))
+        self._reply_text()
+        self.event_bus.publish(INPUT_TOPIC, _utterance("I went for a walk"))
+        self.assertEqual("About I went for a walk?", self._reply_text())
+
+        graph_event = self.graph_uris.get(timeout=1)
+        self.assertEqual(GRAPH_URI, graph_event.payload.signal.text)
+        self.assertEqual("scenario-1", graph_event.metadata.scenario_id)
+
+        self.event_bus.publish(INPUT_TOPIC, _utterance("what did I eat?"))
+        self._reply_text()
+        self.assertTrue(self.graph_uris.empty())
+
+    def test_graph_uri_is_not_published_without_graph_topic(self):
+        self._start(FakeFactory())
+
+        self.event_bus.publish(INPUT_TOPIC, _utterance("yes"))
+        self._reply_text()
+        self.event_bus.publish(INPUT_TOPIC, _utterance("I went for a walk"))
+        self.assertEqual("About I went for a walk?", self._reply_text())
+        self.assertTrue(self.graph_uris.empty())
+        self.assertTrue(self.replies.empty())
 
     def test_reply_is_for_the_agent_and_the_scenario(self):
         self._start(FakeFactory())

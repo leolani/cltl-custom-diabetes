@@ -1,5 +1,13 @@
 import abc
-from typing import Optional
+from typing import NamedTuple, Optional
+
+
+class Reply(NamedTuple):
+    """The agent's reply to one utterance: its text (None to say nothing) and,
+    when the utterance added triples to the knowledge graph, the GraphDB
+    Workbench URL that visualises them. Unpacks as (text, graph_uri)."""
+    text: Optional[str]
+    graph_uri: Optional[str] = None
 
 
 class Conversation(abc.ABC):
@@ -17,8 +25,9 @@ class Conversation(abc.ABC):
         raise NotImplementedError()
 
     @abc.abstractmethod
-    def respond(self, utterance: str) -> Optional[str]:
-        """The agent's reply to one human utterance, or None to say nothing."""
+    def respond(self, utterance: str) -> Reply:
+        """The agent's reply to one human utterance, with the URL visualising
+        the triples extracted from it, if any."""
         raise NotImplementedError()
 
     @abc.abstractmethod

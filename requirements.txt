@@ -1,4 +1,5 @@
 .[service]
+openai
 # The platform packages, pinned to the branch the cltl-apps images and
 # cltl-custom-leoric are built from.
 emissor @ git+https://github.com/leolani/emissor.git@ref_scenarios
@@ -6,3 +7,4 @@ cltl.combot[external] @ git+https://github.com/leolani/cltl-combot.git@ref_scena
 # The knowledge graph layer used by cltl-kg-driven-chat (LongTermMemory).
 cltl.brain @ git+https://github.com/leolani/cltl-knowledgerepresentation
 pytest
+matplotlib

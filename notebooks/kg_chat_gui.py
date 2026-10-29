@@ -52,6 +52,12 @@ terminal `input()` loop.
   `<base>/graphs-visualizations?uri=<activity>&role=context&repositoryId=<repo>`. Not built at
   all for a plain `ChatSession`, or a `kg_address` that isn't a GraphDB repository URL
   (`graphdb_base_and_repository()` returns `(None, None)` and the panel is simply skipped).
+- The graph panel's **"Timeline"** button swaps the diagram for the patient's timeline
+  (`cltl.plots.patient_timeline`, the same plot as in kg_catchup_intent_chat.ipynb): every
+  activity and condition of `session.human` over the last `timeline_days` days (`run_gui()`'s
+  argument, adjustable in the panel's **"Look back"** box), with what this
+  chat added outlined, drawn to the panel's width and scrollable. It is redrawn after every reply
+  and when the panel is resized, for as long as it is shown; **"Graph"** swaps the diagram back.
 - Two independent font-size sliders, both starting at `DEFAULT_FONT_SIZE` (16pt): **"Text size"**
   (always shown) scales the transcript/entry/buttons/status line together -- built on named
   `tkinter.font.Font` objects (`self.chat_font`/`chat_font_bold`/`chat_font_italic`) that every
@@ -89,6 +95,8 @@ Needs Tkinter (part of the Python standard library on most installs; on some Lin
 builds it needs a separate `python3-tk` / `tk-dev` package).
 """
 
+import base64
+import io
 import json
 import math
 import re
@@ -124,9 +132,11 @@ GRAPH_FONT_RANGE = (8, 24)  # (min, max) for the graph panel's "Font size" slide
 # heavier dependencies; see the module docstring).
 # --------------------------------------------------------------------------- #
 
-# Matches a GraphDB repository's SPARQL endpoint, e.g.
-# "http://localhost:7200/repositories/event_sandbox" -> ("http://localhost:7200", "event_sandbox").
-GRAPHDB_REPOSITORY_URL_PATTERN = re.compile(r"^(https?://[^/]+)/repositories/([^/?#]+)/?$")
+# GRAPHDB_REPOSITORY_URL_PATTERN, graphdb_base_and_repository() and graphdb_visualization_url()
+# live in cltl.kg_chat.graphdb_links, shared with cltl.diabetes.
+from cltl.kg_chat.graphdb_links import (  # noqa: E402
+    GRAPHDB_REPOSITORY_URL_PATTERN, graphdb_base_and_repository, graphdb_visualization_url,
+)
 
 LABEL_PREDICATE = "http://www.w3.org/2000/01/rdf-schema#label"
 # gaf:denotedIn/denotedBy link a subject to the raw utterance-span(s) it was extracted from --
@@ -180,6 +190,19 @@ EDGE_EQUIVALENCE_GROUPS = (
 )
 
 SPARQL_TIMEOUT = 8  # seconds -- fetch_triples() runs on a background thread, but shouldn't hang it forever.
+# The timeline query aggregates over every activity of the human, so it gets longer.
+TIMELINE_SPARQL_TIMEOUT = 30
+
+# The timeline (see ChatWindow._toggle_timeline()): how many days back it shows by default, the
+# periods its "Look back" box offers (None: everything in the KG), and the resolution it is drawn
+# at -- the panel's width in pixels / TIMELINE_DPI is its width in inches.
+TIMELINE_DAYS = 60
+TIMELINE_PERIODS = (
+    ("7 days", 7), ("14 days", 14), ("30 days", 30), ("60 days", 60), ("90 days", 90),
+    ("6 months", 182), ("1 year", 365), ("everything", None),
+)
+TIMELINE_DPI = 100
+TIMELINE_MIN_WIDTH_INCHES = 4.5
 
 # Node-link diagram colors (see ChatWindow._render_graph()) -- picked to read clearly on the
 # canvas's plain white background; not tied to any dark/light theming (this is a native desktop
@@ -234,34 +257,6 @@ def _namespace_of(uri: str):
     return uri.rsplit("#", 1)[0] if "#" in uri else uri.rsplit("/", 1)[0]
 
 
-def graphdb_base_and_repository(kg_address):
-    """Split a repository SPARQL endpoint URL into (workbench_base_url, repository_id), e.g.
-    "http://localhost:7200/repositories/event_sandbox" -> ("http://localhost:7200",
-    "event_sandbox") -- the two pieces graphdb_visualization_url() needs to build a GraphDB
-    Workbench link. Returns (None, None) if `kg_address` is falsy or doesn't look like a GraphDB
-    repository endpoint (e.g. a different SPARQL 1.1 server); callers use that to skip building
-    the graph panel/links instead of producing a broken URL."""
-    if not kg_address:
-        return None, None
-    match = GRAPHDB_REPOSITORY_URL_PATTERN.match(kg_address.strip())
-    if not match:
-        return None, None
-    return match.group(1), match.group(2)
-
-
-def graphdb_visualization_url(kg_address, subject_uri, role="context"):
-    """The GraphDB Workbench "Visual graph" URL centered on `subject_uri` -- the same shape
-    GraphDB's own UI links to when you open a resource's graph view, e.g.
-    "http://localhost:7200/graphs-visualizations?uri=<subject_uri>&role=context&repositoryId=<repo>".
-    Returns None if `kg_address` doesn't look like a GraphDB repository endpoint (see
-    graphdb_base_and_repository())."""
-    base, repository_id = graphdb_base_and_repository(kg_address)
-    if not base or not subject_uri:
-        return None
-    query = urllib.parse.urlencode({"uri": subject_uri, "role": role, "repositoryId": repository_id})
-    return f"{base}/graphs-visualizations?{query}"
-
-
 def fetch_triples(kg_address, subject_uri, timeout=SPARQL_TIMEOUT):
     """Every (predicate, object) triple with `subject_uri` as its subject -- one plain SPARQL
     SELECT over HTTP GET against `kg_address` (a GraphDB/RDF4J-style repository endpoint
@@ -278,6 +273,27 @@ def fetch_triples(kg_address, subject_uri, timeout=SPARQL_TIMEOUT):
     triples = [(row["p"]["value"], row["o"]["value"]) for row in rows]
     triples.sort()
     return triples
+
+
+class SparqlEndpoint:
+    """The one method of cltl.brain's LongTermMemory that
+    cltl.plots.patient_timeline.fetch_timeline_entries() needs, over plain urllib like
+    fetch_triples() -- so the timeline doesn't depend on the session having a brain of its own.
+    POSTs the query, since the timeline query is too long to sit comfortably in a URL."""
+
+    def __init__(self, kg_address, timeout=TIMELINE_SPARQL_TIMEOUT):
+        self.kg_address = kg_address
+        self.timeout = timeout
+
+    def _submit_query(self, query):
+        request = urllib.request.Request(
+            self.kg_address.rstrip("/"), data=urllib.parse.urlencode({"query": query}).encode("utf-8"),
+            headers={"Accept": "application/sparql-results+json",
+                     "Content-Type": "application/x-www-form-urlencoded"},
+        )
+        with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        return payload.get("results", {}).get("bindings", [])
 
 
 def _local_name(uri: str) -> str:
@@ -442,8 +458,13 @@ class ChatWindow:
     """One Tk window wrapping a single ChatSession/KgChatSession. Build with the session, then
     call .run() (blocks in Tk's mainloop until the window is closed)."""
 
-    def __init__(self, session, quit_words=DEFAULT_QUIT_WORDS, save_dir=DEFAULT_SAVE_DIR):
+    def __init__(self, session, quit_words=DEFAULT_QUIT_WORDS, save_dir=DEFAULT_SAVE_DIR,
+                 last_conversation_date=None, timeline_days=TIMELINE_DAYS):
         self.session = session
+        # Marked on the timeline, see _toggle_timeline().
+        self.last_conversation_date = last_conversation_date
+        # How many days back the timeline shows, None for everything -- see _on_timeline_period().
+        self._timeline_days = timeline_days
         self.quit_words = quit_words
         self.save_dir = save_dir  # None disables the save-on-quit (see _save_on_quit())
         self._busy = False   # a session.say() call is in flight on the background thread
@@ -460,6 +481,13 @@ class ChatWindow:
         self._opened_subject_uris = set()  # uris already auto-opened in the browser this session
         self._namespace_colors = {}     # "other" namespace -> its assigned color, see _node_fill_color()
         self._graph_font_size = DEFAULT_FONT_SIZE  # adjustable independently of chat_font -- see below
+        # Timeline state -- see _toggle_timeline() et al.
+        self._timeline_visible = False
+        self._timeline_entries = None   # the last fetch_timeline_entries() result
+        self._timeline_image = None     # the tk.PhotoImage shown; Tk drops it unless referenced
+        self._timeline_width = None     # the canvas width it was drawn for, in pixels
+        self._timeline_resize_job = None
+        self._sash_before_timeline = None  # where the sash was before the timeline widened the panel
 
         self.root = tk.Tk()
         self.root.title(f"Leolani KG Chat — {session.human} ({session.date})")
@@ -477,6 +505,7 @@ class ChatWindow:
         if self._show_graph_panel:
             paned = ttk.PanedWindow(self.root, orient="horizontal")
             paned.pack(fill="both", expand=True)
+            self._paned = paned  # its sash is moved to make room for the timeline
             chat_frame = tk.Frame(paned)
             graph_frame = tk.Frame(paned)
             paned.add(chat_frame, weight=3)
@@ -684,6 +713,8 @@ class ChatWindow:
         source = reply_sources[-1] if reply_sources else None
         self._append_turn(agent_turn["speaker"], agent_turn["utterance"], source)
         self._apply_graph_update(graph_update)
+        if self._timeline_visible:
+            self._refresh_timeline()
         self._ready_for_input()
 
     def _on_reply_error(self, exc):
@@ -766,6 +797,8 @@ class ChatWindow:
             link_frame, text="Open in GraphDB ↗", command=self._open_selected_in_browser, state="disabled"
         )
         self.open_graph_button.pack(side="left")
+        self.timeline_button = tk.Button(link_frame, text="Timeline", command=self._toggle_timeline)
+        self.timeline_button.pack(side="left", padx=(6, 0))
         # Off by default -- opening a new browser tab for every freshly-mentioned activity,
         # unasked, would otherwise interrupt whatever else the browser is doing mid-conversation.
         self.auto_open_var = tk.BooleanVar(value=False)
@@ -813,6 +846,38 @@ class ChatWindow:
         self.graph_canvas.pack(fill="both", expand=True, padx=8, pady=8)
         self.graph_canvas.bind("<Configure>", self._on_canvas_resize)
         self._render_graph(None, None, [])  # the "(nothing pushed yet)" placeholder
+
+        # Shown instead of graph_canvas while the timeline is (see _toggle_timeline()): the plot
+        # as one image on a canvas, scrolled vertically since it is taller than the panel, and
+        # horizontally when the panel is narrower than TIMELINE_MIN_WIDTH_INCHES.
+        self.timeline_frame = tk.Frame(graph_frame)
+        # A preset period or a number of days typed in (see _on_timeline_period()); only redraws
+        # the entries already fetched, which cover everything in the KG.
+        period_frame = tk.Frame(self.timeline_frame)
+        period_frame.pack(side="top", fill="x", pady=(0, 4))
+        tk.Label(period_frame, text="Look back:", font=("Helvetica", 10)).pack(side="left")
+        self._timeline_period_var = tk.StringVar(value=self._timeline_period_label(self._timeline_days))
+        self.timeline_period_combo = ttk.Combobox(
+            period_frame, textvariable=self._timeline_period_var, width=12,
+            values=[label for label, _ in TIMELINE_PERIODS],
+        )
+        self.timeline_period_combo.pack(side="left", padx=(6, 0))
+        self.timeline_period_combo.bind("<<ComboboxSelected>>", self._on_timeline_period)
+        self.timeline_period_combo.bind("<Return>", self._on_timeline_period)
+        tk.Label(period_frame, text="(or a number of days)", font=("Helvetica", 9),
+                 fg="#888888").pack(side="left", padx=(6, 0))
+        self.timeline_canvas = tk.Canvas(self.timeline_frame, background=GRAPH_BG, highlightthickness=0)
+        timeline_yscroll = ttk.Scrollbar(self.timeline_frame, orient="vertical",
+                                         command=self.timeline_canvas.yview)
+        timeline_xscroll = ttk.Scrollbar(self.timeline_frame, orient="horizontal",
+                                         command=self.timeline_canvas.xview)
+        self.timeline_canvas.configure(yscrollcommand=timeline_yscroll.set,
+                                       xscrollcommand=timeline_xscroll.set)
+        timeline_yscroll.pack(side="right", fill="y")
+        timeline_xscroll.pack(side="bottom", fill="x")
+        self.timeline_canvas.pack(side="left", fill="both", expand=True)
+        self.timeline_canvas.bind("<Configure>", self._on_timeline_resize)
+        self.timeline_canvas.bind("<MouseWheel>", self._on_timeline_scroll)
 
         self.graph_status_label = tk.Label(
             graph_frame, text="", font=("Helvetica", 9, "italic"), fg="#888888", anchor="w"
@@ -1101,6 +1166,137 @@ class ChatWindow:
         payload = {"new_uris": [], "selected_uri": uri, "triples": triples, "error": error}
         self._schedule(self._apply_graph_update, payload)
 
+    # ------------------------------------------------------------------- #
+    # Timeline -- the patient's activities and conditions over time, shown in the graph panel
+    # instead of the diagram (see the module docstring's "Timeline" bullet).
+    # ------------------------------------------------------------------- #
+
+    def _toggle_timeline(self):
+        """"Timeline"/"Graph" button: swap the diagram for the timeline, or back."""
+        self._timeline_visible = not self._timeline_visible
+        if self._timeline_visible:
+            self._widen_for_timeline()
+            self.graph_canvas.pack_forget()
+            self.timeline_frame.pack(fill="both", expand=True, padx=8, pady=8, before=self.graph_status_label)
+            self.timeline_button.configure(text="Graph")
+            self._refresh_timeline()
+        else:
+            self.timeline_frame.pack_forget()
+            if self._sash_before_timeline is not None:
+                self._paned.sashpos(0, self._sash_before_timeline)
+                self._sash_before_timeline = None
+            self.graph_canvas.pack(fill="both", expand=True, padx=8, pady=8, before=self.graph_status_label)
+            self.timeline_button.configure(text="Timeline")
+            self.graph_status_label.configure(text="")
+
+    def _widen_for_timeline(self):
+        """Move the sash so the panel is wide enough for the timeline at its minimum width,
+        while leaving the chat at least a third of the window; _toggle_timeline() moves it back."""
+        total = self._paned.winfo_width()
+        sash = self._paned.sashpos(0)
+        # The plot, plus the panel's padding and the vertical scrollbar.
+        wanted = int(TIMELINE_MIN_WIDTH_INCHES * TIMELINE_DPI) + 40
+        if total - sash < wanted:
+            self._sash_before_timeline = sash
+            self._paned.sashpos(0, max(total - wanted, total // 3))
+
+    def _refresh_timeline(self):
+        """Fetch the timeline entries on a background thread (a SPARQL round-trip, like
+        fetch_triples()), then draw them on the main thread -- see _apply_timeline()."""
+        self.graph_status_label.configure(text="drawing the timeline…")
+        threading.Thread(target=self._fetch_timeline, daemon=True).start()
+
+    def _fetch_timeline(self):
+        try:
+            from cltl.plots.patient_timeline import fetch_timeline_entries
+
+            entries = fetch_timeline_entries(SparqlEndpoint(self.session.kg_address), self.session.human)
+            self._schedule(self._apply_timeline, entries, None)
+        except Exception as exc:  # e.g. GraphDB unreachable, or matplotlib not installed
+            self._schedule(self._apply_timeline, None, exc)
+
+    def _apply_timeline(self, entries, error):
+        if self._closed:
+            return
+        if error is not None:
+            self.graph_status_label.configure(text=f"couldn't draw the timeline: {error}")
+            return
+        self._timeline_entries = entries
+        self.graph_status_label.configure(text="")
+        if self._timeline_visible:
+            self._draw_timeline()
+
+    def _draw_timeline(self):
+        """Draw the cached entries at the timeline canvas's current width. Runs on the main
+        thread: matplotlib's pyplot isn't thread-safe. The figure is rendered to a PNG, shown as
+        a tk.PhotoImage, and closed right away, so it never also turns up in the notebook."""
+        if self._timeline_entries is None:
+            return
+        import matplotlib.pyplot as plt
+        from cltl.plots.patient_timeline import plot_patient_timeline
+
+        width = max(self.timeline_canvas.winfo_width(), 1)
+        fig = plot_patient_timeline(
+            self._timeline_entries, self.session.human, current_date=datetime.now(),
+            days=self._timeline_days, last_conversation_date=self.last_conversation_date,
+            highlight_chat=getattr(self.session, "chat", None),
+            width=max(width / TIMELINE_DPI, TIMELINE_MIN_WIDTH_INCHES),
+        )
+        png = io.BytesIO()
+        try:
+            fig.savefig(png, format="png", dpi=TIMELINE_DPI)
+        finally:
+            plt.close(fig)
+        self._timeline_image = tk.PhotoImage(data=base64.b64encode(png.getvalue()))
+        self._timeline_width = width
+        self.timeline_canvas.delete("all")
+        self.timeline_canvas.create_image(0, 0, anchor="nw", image=self._timeline_image)
+        self.timeline_canvas.configure(scrollregion=(0, 0, self._timeline_image.width(),
+                                                     self._timeline_image.height()))
+
+    @staticmethod
+    def _timeline_period_label(days):
+        return next((label for label, period in TIMELINE_PERIODS if period == days), f"{days} days")
+
+    def _on_timeline_period(self, event=None):
+        """"Look back" box: a TIMELINE_PERIODS label, or a number of days ("45", "45 days").
+        Anything else is put back to the current period."""
+        text = self._timeline_period_var.get().strip().lower()
+        periods = {label: days for label, days in TIMELINE_PERIODS}
+        number = re.match(r"^(\d+)\s*(days?)?$", text)
+        if text in periods:
+            days = periods[text]
+        elif number and int(number.group(1)) > 0:
+            days = int(number.group(1))
+        else:
+            self.graph_status_label.configure(text=f"not a period: {text!r} -- pick one, or type a number of days")
+            self._timeline_period_var.set(self._timeline_period_label(self._timeline_days))
+            return
+        self._timeline_period_var.set(self._timeline_period_label(days))
+        self.graph_status_label.configure(text="")
+        if days != self._timeline_days:
+            self._timeline_days = days
+            self._draw_timeline()
+
+    def _on_timeline_resize(self, event):
+        """<Configure> handler: redraw at the new width once resizing stops -- unlike the
+        diagram, redrawing the plot takes a noticeable moment, so not on every event."""
+        if self._timeline_resize_job is not None:
+            self.root.after_cancel(self._timeline_resize_job)
+            self._timeline_resize_job = None
+        if self._timeline_width is None or abs(event.width - self._timeline_width) > 20:
+            self._timeline_resize_job = self.root.after(300, self._redraw_timeline_after_resize)
+
+    def _redraw_timeline_after_resize(self):
+        self._timeline_resize_job = None
+        if self._timeline_visible and not self._closed:
+            self._draw_timeline()
+
+    def _on_timeline_scroll(self, event):
+        # macOS reports small wheel deltas, Windows multiples of 120.
+        steps = -event.delta if abs(event.delta) < 120 else -event.delta // 120
+        self.timeline_canvas.yview_scroll(int(steps), "units")
+
     def _open_selected_in_browser(self):
         if self._selected_subject_uri:
             self._open_in_browser(self._selected_subject_uri)
@@ -1184,7 +1380,8 @@ class ChatWindow:
             self._on_close()
 
 
-def run_gui(session, quit_words=DEFAULT_QUIT_WORDS, save_dir=DEFAULT_SAVE_DIR) -> list:
+def run_gui(session, quit_words=DEFAULT_QUIT_WORDS, save_dir=DEFAULT_SAVE_DIR,
+            last_conversation_date=None, timeline_days=TIMELINE_DAYS) -> list:
     """Open a chat window for `session` (a ChatSession or KgChatSession) and block until it's
     closed (via the window's Quit button, its close button, or by typing one of `quit_words`).
     The human types directly into the window's own input box -- no input()/popup -- and every
@@ -1195,7 +1392,11 @@ def run_gui(session, quit_words=DEFAULT_QUIT_WORDS, save_dir=DEFAULT_SAVE_DIR) -
     save_session()/session_statistics()), and their paths printed; pass save_dir=None to skip
     that.
 
+    `last_conversation_date`, if given, is marked on the graph panel's timeline, which looks back
+    `timeline_days` days (None: everything) until changed in its "Look back" box.
+
     Returns session.turns, same as ChatSession.run_interactive(), so it's a drop-in replacement
     in notebook cells."""
-    ChatWindow(session, quit_words=quit_words, save_dir=save_dir).run()
+    ChatWindow(session, quit_words=quit_words, save_dir=save_dir,
+               last_conversation_date=last_conversation_date, timeline_days=timeline_days).run()
     return session.turns

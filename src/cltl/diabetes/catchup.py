@@ -31,7 +31,8 @@ from pathlib import Path
 from typing import Optional
 
 from cltl.diabetes import place
-from cltl.diabetes.api import Conversation, ConversationFactory
+from cltl.diabetes.api import Conversation, ConversationFactory, Reply
+from cltl.kg_chat.graphdb_links import graphdb_visualization_url
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,7 @@ class CatchUpConversation(Conversation):
 
         self.scenario_id = scenario_id
         self.human = human
+        self._kg_address = kg_address
         self._log_dir = log_dir
         # What open() asked about the place (place.ASK or place.CONFIRM), so
         # the next utterance is taken as the answer to it; None otherwise.
@@ -131,15 +133,35 @@ class CatchUpConversation(Conversation):
 
         return opening
 
-    def respond(self, utterance: str) -> Optional[str]:
+    def respond(self, utterance: str) -> Reply:
         question, self._place_question = self._place_question, None
         if question == place.ASK:
             self._save_named_place(lambda city: self._places.name_place(utterance, city))
-            return self._after_place_answer(utterance)
+            return Reply(self._after_place_answer(utterance))
         if question == place.CONFIRM:
-            return self._answer_confirmation(utterance)
+            return Reply(self._answer_confirmation(utterance))
 
-        return self.session.say(utterance)
+        reply = self.session.say(utterance)
+
+        return Reply(reply, self._graph_uri())
+
+    def _graph_uri(self) -> Optional[str]:
+        """The GraphDB visualisation of the activity the last utterance added
+        triples about, or None if it added nothing (e.g. a question answered
+        from the knowledge graph)."""
+        human_entries = [entry for entry in self.session.turn_log if entry["speaker"] == self.human]
+        if not human_entries or not human_entries[-1]["triples_pushed"]:
+            return None
+
+        # say() points last_subject_uris at the activities of this utterance,
+        # including the one a follow-up answer added a role to. The visual
+        # graph centres on one of them; the others are a click away when they
+        # share a role, such as the human as agent.
+        subjects = self.session.last_subject_uris
+        if len(subjects) > 1:
+            logger.info("Utterance added triples about %s, visualising %s", subjects, subjects[0])
+
+        return graphdb_visualization_url(self._kg_address, subjects[0]) if subjects else None
 
     def _answer_confirmation(self, utterance: str) -> str:
         decision = self._place_decision

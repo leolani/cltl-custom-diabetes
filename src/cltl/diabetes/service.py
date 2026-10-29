@@ -54,6 +54,9 @@ class DiabetesService:
 
         input_topic = config.get("topic_input")
         output_topic = config.get("topic_output")
+        # Where the GraphDB URL visualising the triples extracted from an
+        # utterance is published; not published when empty.
+        graph_topic = config.get("graph_output") if "graph_output" in config else None
         scenario_topic = config.get("topic_scenario")
         human = config.get("human")
         open_on = config.get("open_on") if "open_on" in config else OPEN_ON_UTTERANCE
@@ -71,11 +74,13 @@ class DiabetesService:
                            "on the exchange. Set CLTL_TENANT to scope it to one tenant.")
 
         return cls(input_topic, output_topic, scenario_topic, human, factory, ltm, event_bus,
-                   resource_manager, open_on=open_on, use_scenario_speaker=use_scenario_speaker)
+                   resource_manager, open_on=open_on, use_scenario_speaker=use_scenario_speaker,
+                   graph_topic=graph_topic or None)
 
     def __init__(self, input_topic: str, output_topic: str, scenario_topic: str, human: str,
                  factory: ConversationFactory, ltm, event_bus: EventBus, resource_manager: ResourceManager,
-                 open_on: str = OPEN_ON_UTTERANCE, use_scenario_speaker: bool = False):
+                 open_on: str = OPEN_ON_UTTERANCE, use_scenario_speaker: bool = False,
+                 graph_topic: Optional[str] = None):
         if open_on not in (OPEN_ON_UTTERANCE, OPEN_ON_SCENARIO):
             raise ValueError(f"[cltl.diabetes] open_on must be '{OPEN_ON_UTTERANCE}' "
                              f"or '{OPEN_ON_SCENARIO}', got {open_on!r}")
@@ -85,6 +90,7 @@ class DiabetesService:
         self._input_topic = input_topic
         self._output_topic = output_topic
         self._scenario_topic = scenario_topic
+        self._graph_topic = graph_topic
         self._human = human
         self._open_on = open_on
         self._use_scenario_speaker = use_scenario_speaker
@@ -107,7 +113,7 @@ class DiabetesService:
 
     def start(self, timeout=30):
         self._topic_worker = TopicWorker([self._input_topic, self._scenario_topic], self._event_bus,
-                                         provides=[self._output_topic],
+                                         provides=[t for t in (self._output_topic, self._graph_topic) if t],
                                          resource_manager=self._resource_manager,
                                          processor=self._process, buffer_size=BUFFER_SIZE,
                                          name=self.__class__.__name__)
@@ -162,12 +168,14 @@ class DiabetesService:
             return
 
         try:
-            response = self._conversations[scenario_id].respond(text)
+            response, graph_uri = self._conversations[scenario_id].respond(text)
         except Exception:
             logger.exception("Failed to respond to %r in scenario %s", text, scenario_id)
-            response = ERROR_REPLY
+            response, graph_uri = ERROR_REPLY, None
 
         self._publish(response, scenario_id, event)
+        if graph_uri and self._graph_topic:
+            self._publish(graph_uri, scenario_id, event, topic=self._graph_topic)
 
     def _open(self, scenario_id: str, event: Event):
         human = self._speakers.get(scenario_id, self._human)
@@ -206,7 +214,8 @@ class DiabetesService:
 
         return name.strip() if name and name.strip() else None
 
-    def _publish(self, response: Optional[str], scenario_id: str, source: Event):
+    def _publish(self, response: Optional[str], scenario_id: str, source: Event,
+                 topic: Optional[str] = None):
         if not response:
             return
 
@@ -215,7 +224,7 @@ class DiabetesService:
         # source=event copies the tenant onto the reply; without it the reply
         # is routed to no tenant at all. for_scenario_payload also sets the
         # scenario id, which a scenario event does not carry in its metadata.
-        self._event_bus.publish(self._output_topic,
+        self._event_bus.publish(topic or self._output_topic,
                                 Event.for_scenario_payload(scenario_id, payload, source=source))
 
     def _add_context(self, scenario_id: str, payload):
