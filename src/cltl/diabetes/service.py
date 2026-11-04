@@ -8,6 +8,7 @@ from cltl.combot.event.emissor import TextSignalEvent
 from cltl.combot.infra.config import ConfigurationManager
 from cltl.combot.infra.event import Event, EventBus
 from cltl.combot.event.display import DisplayEvent
+from cltl.combot.event.status import StatusEvent
 from cltl.combot.infra.event.util import extract_scenario_id
 from cltl.combot.infra.resource import ResourceManager
 from cltl.combot.infra.time_util import timestamp_now
@@ -59,6 +60,7 @@ class DiabetesService:
         # utterance is published; not published when empty.
         graph_topic = config.get("graph_output") if "graph_output" in config else None
         scenario_topic = config.get("topic_scenario")
+        status_topic = config.get("topic_status")
         human = config.get("human")
         open_on = config.get("open_on") if "open_on" in config else OPEN_ON_UTTERANCE
         use_scenario_speaker = (config.get_boolean("use_scenario_speaker")
@@ -74,11 +76,11 @@ class DiabetesService:
             logger.warning("[cltl.event.kombu] tenant is empty: this module answers EVERY tenant "
                            "on the exchange. Set CLTL_TENANT to scope it to one tenant.")
 
-        return cls(input_topic, output_topic, scenario_topic, human, factory, ltm, event_bus,
+        return cls(input_topic, output_topic, scenario_topic, status_topic, human, factory, ltm, event_bus,
                    resource_manager, open_on=open_on, use_scenario_speaker=use_scenario_speaker,
                    graph_topic=graph_topic or None)
 
-    def __init__(self, input_topic: str, output_topic: str, scenario_topic: str, human: str,
+    def __init__(self, input_topic: str, output_topic: str, scenario_topic: str, status_topic, human: str,
                  factory: ConversationFactory, ltm, event_bus: EventBus, resource_manager: ResourceManager,
                  open_on: str = OPEN_ON_UTTERANCE, use_scenario_speaker: bool = False,
                  graph_topic: Optional[str] = None):
@@ -92,6 +94,7 @@ class DiabetesService:
         self._output_topic = output_topic
         self._scenario_topic = scenario_topic
         self._graph_topic = graph_topic
+        self._status_topic = status_topic
         self._human = human
         self._open_on = open_on
         self._use_scenario_speaker = use_scenario_speaker
@@ -151,9 +154,15 @@ class DiabetesService:
                 self._speakers[scenario_id] = speaker
             if self._open_on == OPEN_ON_SCENARIO and scenario_id not in self._conversations:
                 self._open(scenario_id, event)
+            self._event_bus.publish(self._status_topic, Event.for_scenario_payload(
+                scenario_id, StatusEvent("Loading the memory from the KG", "memory", progress=0.5, key="agent.model")))
+
         elif event_type == SCENARIO_STOPPED:
             self._close(scenario_id)
             self._speakers.pop(scenario_id, None)
+            self._event_bus.publish(self._status_topic, Event.for_scenario_payload(
+                scenario_id, StatusEvent("This conversation is over", "agent", key="agent.model", resolved=True)))
+
 
     def _process_utterance(self, event: Event[TextSignalEvent]):
         scenario_id = extract_scenario_id(event)
@@ -169,7 +178,11 @@ class DiabetesService:
             return
 
         try:
+            self._event_bus.publish(self._status_topic, Event.for_scenario_payload(
+                scenario_id, StatusEvent("Loading the memory from the KG", "memory", progress=0.5, key="agent.model")))
             response, graph_uri = self._conversations[scenario_id].respond(text)
+            self._event_bus.publish(self._status_topic, Event.for_scenario_payload(
+                scenario_id, StatusEvent("Loading the memory from the KG", "memory", progress=0.5, key="agent.model")))
         except Exception:
             logger.exception("Failed to respond to %r in scenario %s", text, scenario_id)
             response, graph_uri = ERROR_REPLY, None
@@ -179,6 +192,12 @@ class DiabetesService:
             displayEvent = DisplayEvent("http://localhost:8000/monitoring/…","Monitoring")
             self._event_bus.publish(self._graph_topic, Event.for_scenario_payload(scenario_id,displayEvent))
            # self._publish(graph_uri, scenario_id, event, topic=self._graph_topic)
+            self._event_bus.publish(self._status_topic, Event.for_scenario_payload(
+                scenario_id, StatusEvent("Loading the memory from the KG", "KG", progress=0.5, key="kg.model")))
+        elif response:
+            logger.warning("No graph_uri in response to %r in scenario %s", text, scenario_id)
+            self._event_bus.publish(self._status_topic, Event.for_scenario_payload(
+                scenario_id, StatusEvent("This is a response from reasoning over the KG", "LLM", progress=0.5, key="llm.model")))
 
     def _open(self, scenario_id: str, event: Event):
         human = self._speakers.get(scenario_id, self._human)
