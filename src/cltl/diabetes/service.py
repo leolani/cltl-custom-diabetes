@@ -7,6 +7,7 @@ from typing import Dict, Optional, Set
 from cltl.combot.event.emissor import TextSignalEvent
 from cltl.combot.infra.config import ConfigurationManager
 from cltl.combot.infra.event import Event, EventBus
+from cltl.combot.event.display import DisplayEvent
 from cltl.combot.infra.event.util import extract_scenario_id
 from cltl.combot.infra.resource import ResourceManager
 from cltl.combot.infra.time_util import timestamp_now
@@ -175,7 +176,9 @@ class DiabetesService:
 
         self._publish(response, scenario_id, event)
         if graph_uri and self._graph_topic:
-            self._publish(graph_uri, scenario_id, event, topic=self._graph_topic)
+            displayEvent = DisplayEvent("http://localhost:8000/monitoring/…","Monitoring")
+            self._event_bus.publish(self._graph_topic, Event.for_scenario_payload(scenario_id,displayEvent))
+           # self._publish(graph_uri, scenario_id, event, topic=self._graph_topic)
 
     def _open(self, scenario_id: str, event: Event):
         human = self._speakers.get(scenario_id, self._human)
