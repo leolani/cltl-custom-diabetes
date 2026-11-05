@@ -199,7 +199,6 @@ class DiabetesService:
             logger.info("Response %r in scenario %s", response, scenario_id)
             if graph_uri:
                 logger.info("Graph URI %r, for topic %s", graph_uri, self._graph_topic)
-
             self._event_bus.publish(self._status_topic, Event.for_scenario_payload(
                 scenario_id, StatusEvent("Done processing the utterance", "NLU", progress=0.5, key="agent.model")))
         except Exception:
@@ -207,7 +206,7 @@ class DiabetesService:
             response, graph_uri = ERROR_REPLY, None
         if response:
             self._publish(response, scenario_id, event)
-        
+
         if graph_uri and self._graph_topic:
             displayEvent = DisplayEvent(graph_uri,"Monitoring")
             self._event_bus.publish(self._graph_topic, Event.for_scenario_payload(scenario_id,displayEvent))
