@@ -115,6 +115,33 @@ class KgQuestionAnswererTest(unittest.TestCase):
 
         self.assertEqual("You had pasta yesterday.", reply)
 
+    def test_detail_is_given_on_request(self):
+        full = " ".join(["word"] * 20)
+        llm = FakeLLM({"kg_question": True}, full)
+        answerer = self._answerer(llm, max_answer_words=10)
+        answerer.try_answer("What did I eat?")
+
+        self.assertEqual(full, answerer.try_answer("Yes please"))
+        # Given once only.
+        self.assertIsNone(answerer.try_answer("Yes please"))
+
+    def test_detail_is_dropped_on_no_or_other_message(self):
+        llm = FakeLLM({"kg_question": True}, " ".join(["word"] * 20))
+        answerer = self._answerer(llm, max_answer_words=10)
+        answerer.try_answer("What did I eat?")
+        self.assertIsNone(answerer.try_answer("No thanks."))
+
+        answerer.try_answer("What did I eat?")
+        self.assertIsNone(answerer.try_answer("I went for a walk today."))
+        self.assertIsNone(answerer._pending_detail)
+
+    def test_short_answer_offers_no_detail(self):
+        llm = FakeLLM({"kg_question": True}, "Pasta.")
+        answerer = self._answerer(llm)
+        answerer.try_answer("What did I eat?")
+
+        self.assertIsNone(answerer._pending_detail)
+
     def test_narrow_plan_without_matches_is_broadened(self):
         def rows(query):
             if "GROUP BY ?activity" in query and "take_drink" in query:

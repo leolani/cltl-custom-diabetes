@@ -68,9 +68,13 @@ class CatchUpConversation(Conversation):
             human, ltm, self.current_date, fallback_date)
         self.catch_up_topics = catch_up.find_catch_up_topics(
             ltm, self.current_date, self.last_conversation_date)
+        # Only these are recapped in the opening; the catch-up topics above
+        # are every topic with history, to fill up to two weeks.
+        self.last_topics = catch_up.find_last_conversation_topics(human, ltm)
         logger.info("Catch-up for %s in scenario %s: last conversation %s, topics %s",
                     human, scenario_id, self.last_conversation_date,
                     [(t["activity_type"], t["expected_count"]) for t in self.catch_up_topics])
+        logger.info("Topics of the last conversation of %s: %s", human, self.last_topics)
 
         model = model or chat_sessions.DEFAULT_MODEL
         self._model = model
@@ -124,7 +128,8 @@ class CatchUpConversation(Conversation):
 
         try:
             opening = self.tracker.opening_question(self.current_date, self.last_conversation_date,
-                                                    place_question=place_question, place_remark=place_remark)
+                                                    place_question=place_question, place_remark=place_remark,
+                                                    last_topics=self.last_topics)
         except self._chat_sessions.ChatTimeoutError as e:
             logger.warning("Timed out %s, opening with a plain greeting instead", e.source)
             opening = f"Hi {self.human}, good to talk to you again! {fallback}"

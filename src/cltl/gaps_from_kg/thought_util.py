@@ -582,6 +582,32 @@ def get_role_relation_query(event_id):
         return query
 
 
+def get_last_chat_activity_types_query(target):
+    """The rdf:types of the activities `target` (an actor label) mentioned in their LAST chat:
+    the chat (grasp:Chat, via sem:subEventOf) holding their most recent mention (by
+    sem:hasBeginTimeStamp, a "YYYY-MM-DD HH:MM:SS.ffffff" string, so it sorts as a string).
+    Only the human's own utterances count, not the agent's: the agent's opening recap is
+    extracted into activities too, and counting those would make every topic it named look
+    discussed again next time."""
+    label = '"' + target + '"'
+    query = "PREFIX gaf: <http://groundedannotationframework.org/gaf#>\
+            PREFIX prov: <http://www.w3.org/ns/prov#>\
+            PREFIX sem: <http://semanticweb.cs.vu.nl/2009/11/sem/>\
+            PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>\
+            PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>\
+            select ?type (MIN(?t) as ?first) where { \
+                { select ?chat where { \
+                    ?u sem:hasActor ?actor ; sem:subEventOf ?chat . \
+                    ?actor rdfs:label " + label + " . \
+                    ?m prov:wasDerivedFrom ?u ; sem:hasBeginTimeStamp ?last . \
+                  } ORDER BY DESC(STR(?last)) LIMIT 1 } \
+                ?u2 sem:subEventOf ?chat ; sem:hasActor ?actor2 . \
+                ?actor2 rdfs:label " + label + " . \
+                ?m2 prov:wasDerivedFrom ?u2 ; sem:hasBeginTimeStamp ?t . \
+                ?a gaf:denotedIn ?m2 ; rdf:type ?type . \
+            } GROUP BY ?type ORDER BY ?first"
+    return query
+
 def get_utterance_time_query(event_id):
         """The timestamp of the UTTERANCE `event_id` was denoted in (`gaf:denotedIn` ->
         `sem:hasBeginTimeStamp`, the same chain get_role_relation_query() already uses) -- the

@@ -11,7 +11,7 @@ from cltl.diabetes.service import DiabetesService
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MAX_ANSWER_WORDS = 80
+DEFAULT_MAX_ANSWER_WORDS = 35
 
 
 def _kg_address(config) -> Optional[str]:

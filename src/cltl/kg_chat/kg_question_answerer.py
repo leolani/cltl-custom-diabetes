@@ -21,7 +21,8 @@ Per human utterance, at most three steps:
      once without them, so a wrongly guessed activity type doesn't hide the answer.
   3. answer() -- one LLM call that paraphrases the retrieved facts as a plain-language reply to
      the question, and, if that reply is longer than `max_answer_words`, a second one that
-     summarises it to fit.
+     shortens it to fit and asks whether they want more detail. The full answer is kept: if the
+     human's next message says yes ("yes please", "tell me more"), try_answer() gives it.
 """
 
 import json
@@ -35,8 +36,15 @@ from cltl.kg_chat.chat_sessions import DEFAULT_MODEL, _call_openai, _openai_clie
 
 logger = logging.getLogger(__name__)
 
-# Above this many words, the paraphrased answer is summarised (see KgQuestionAnswerer.answer()).
-DEFAULT_MAX_ANSWER_WORDS = 80
+# Above this many words, the paraphrased answer is shortened, and the human is asked whether they
+# want the full one (see KgQuestionAnswerer.answer()).
+DEFAULT_MAX_ANSWER_WORDS = 35
+
+# Replies to "do you want more detail?" that need no LLM call to understand.
+_WANTS_DETAIL = re.compile(
+    r"^\W*(yes|yeah|yep|yup|sure|please|ok|okay|go ahead|go on|tell me more|more|why not|of course|"
+    r"definitely|absolutely|i do|i would|i'd like|ja|graag)\b", re.IGNORECASE)
+_NO_DETAIL = re.compile(r"^\W*(no|nope|nah|not now|not really|never mind|nee)\b", re.IGNORECASE)
 
 # How many activities (most recently mentioned first) are passed to the LLM as facts.
 DEFAULT_MAX_FACTS = 40
@@ -212,6 +220,8 @@ class KgQuestionAnswerer:
         self._run_query = run_query or self._endpoint_query
         self._complete = complete or self._openai_complete
         self._graph = None
+        # The full answer behind a shortened one (see answer()), until the human's next message.
+        self._pending_detail: Optional[str] = None
 
     # ------------------------------------------------------------------ #
     # Entry point
@@ -224,7 +234,14 @@ class KgQuestionAnswerer:
 
         A failed knowledge graph query still answers (LOOKUP_FAILED_REPLY): handing the question
         back to the caller would extract it as if it were a report ("What did I eat?" -> a new
-        "eat" activity) and ask about that instead."""
+        "eat" activity) and ask about that instead.
+
+        Right after a shortened answer, a message that says yes to more detail gets the full
+        answer; any other message drops it and is handled as usual."""
+        detail, self._pending_detail = self._pending_detail, None
+        if detail and self.wants_detail(utterance):
+            return detail
+
         plan = self.plan(utterance, messages)
         if plan is None:
             return None
@@ -429,18 +446,38 @@ class KgQuestionAnswerer:
         reply = (_call_openai("looking up the answer to your question", self._complete, prompt) or "").strip()
 
         if len(reply.split()) > self.max_answer_words:
-            reply = self.summarise(plan.question, reply)
+            short = self.summarise(plan.question, reply)
+            if short != reply:
+                self._pending_detail = reply
+            reply = short
 
         return reply
+
+    def wants_detail(self, utterance: str) -> bool:
+        """Whether `utterance` says yes to the offer of more detail that ended the last answer."""
+        if _NO_DETAIL.match(utterance):
+            return False
+        if _WANTS_DETAIL.match(utterance) and len(utterance.split()) <= 8:
+            return True
+        prompt = [
+            {"role": "system", "content": (
+                "The coach just gave a short answer and asked whether the person wants more "
+                "detail. Does the person's reply ask for that detail? Answer YES or NO only.")},
+            {"role": "user", "content": utterance},
+        ]
+        raw = _call_openai("checking whether you want more detail", self._complete, prompt) or ""
+        return raw.strip().upper().startswith("YES")
 
     def summarise(self, question: str, answer: str) -> str:
         prompt = [
             {"role": "system", "content": (
-                f"Shorten the coach's answer to {self.human}'s question to at most "
-                f"{self.max_answer_words} words. Keep the facts that answer the question most "
-                "directly and the most recent ones; group similar things together instead of "
-                "listing each. Keep the warm, direct tone, speak to them as \"you\", and do not "
-                "add anything that is not in the answer. Reply with the shortened answer only."
+                f"Shorten the coach's answer to {self.human}'s question to one or two short "
+                f"sentences, at most {self.max_answer_words} words. Give the gist that answers "
+                "the question most directly, with the most recent facts; group similar things "
+                "together instead of listing each. Keep the warm, direct tone, speak to them as "
+                "\"you\", and do not add anything that is not in the answer. End with a very "
+                "short question asking whether they want more detail (e.g. \"Want the details?\"). "
+                "Reply with the shortened answer only."
             )},
             {"role": "user", "content": f"Question: {question}\n\nAnswer: {answer}"},
         ]

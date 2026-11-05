@@ -121,10 +121,12 @@ def _load_gaps_from_kg():
         sys.path.insert(0, str(src_dir))
     import cltl.gaps_from_kg.get_temporal_containers as get_temporal_containers
     import cltl.gaps_from_kg.n2mu_sem_roles as n2mu_sem_roles
+    import cltl.gaps_from_kg.thought_util as thought_util
     from cltl.brain.long_term_memory import LongTermMemory
     _GAPS_DEPS = {
         "get_temporal_containers": get_temporal_containers,
         "n2mu_sem_roles": n2mu_sem_roles,
+        "thought_util": thought_util,
         "LongTermMemory": LongTermMemory,
     }
     return _GAPS_DEPS
@@ -176,6 +178,25 @@ def find_last_conversation_date(human: str, brain, current_date: datetime,
     return deps["get_temporal_containers"].get_last_conversation_date(
         human, brain, current_date, fallback_date
     )
+
+
+def find_last_conversation_topics(human: str, brain,
+                                   activity_types=DEFAULT_GAP_ACTIVITY_TYPES) -> List[str]:
+    """The `activity_types` local names `human` themselves mentioned in their LAST chat, in the
+    order they first came up -- what SaturationTracker.opening_question() recaps as "what we
+    talked about last time". Deliberately NOT the catch-up topics (find_catch_up_topics()), which
+    hold every topic with any history so the saturation loop can fill the (capped) catch-up
+    period; recapping those made the opening list practically every topic ever discussed.
+    [] when there is no earlier chat with this human."""
+    deps = _load_gaps_from_kg()
+    query = deps["thought_util"].get_last_chat_activity_types_query(human)
+    wanted = set(activity_types)
+    topics = []
+    for row in brain._submit_query(query):
+        local_name = row["type"]["value"].rsplit("/", 1)[-1]
+        if local_name in wanted and local_name not in topics:
+            topics.append(local_name)
+    return topics
 
 
 # The baseline unit find_catch_up_topics() measures history against: a WEEKLY average, always --
@@ -333,8 +354,9 @@ def _catch_up_system_prompt(human: str) -> str:
     return (
         f"You are a lifestyle coach talking with {human}, a person with Type 2 diabetes, at the "
         "start of a new chat conversation about diet, exercise, sleep, stress and daily routines "
-        "that affect their blood sugar management. Keep your reply short (1-3 sentences) and "
-        "warm. Only ever ask a question -- do not give advice, recommendations, or suggestions."
+        "that affect their blood sugar management. Keep your reply short, concise and warm: "
+        "one or two short sentences, no more than about 30 words, no lists and no filler. Only "
+        "ever ask a question -- do not give advice, recommendations, or suggestions."
     )
 
 
@@ -351,7 +373,7 @@ def _wrap_up_system_prompt(human: str) -> str:
     everything" and never actually weigh what the human had just said against it."""
     return (
         f"You are a lifestyle coach talking with {human}, a person with Type 2 diabetes. Keep "
-        "your reply short (1-2 sentences). The catch-up topics for this period are covered, but "
+        "your reply short and concise (one or two short sentences). The catch-up topics for this period are covered, but "
         "look at the human's OWN last message before deciding what to do: if it asks a question, "
         "asks what's next, or otherwise shows they want to keep talking, treat that as more "
         "important than \"everything's covered\" and continue the conversation naturally instead "
@@ -369,8 +391,8 @@ def _recap_system_prompt(human: str) -> str:
     reply)."""
     return (
         f"You are a lifestyle coach talking with {human}, a person with Type 2 diabetes. They "
-        "just asked you to recap what's been discussed. Give a short (2-3 sentence), warm, plain "
-        "summary of what's actually been covered. Do not give advice, recommendations, or "
+        "just asked you to recap what's been discussed. Give a short, concise (one or two "
+        "sentences, no lists), warm, plain summary of what's actually been covered. Do not give advice, recommendations, or "
         "suggestions, and do not ask a new question unless they specifically asked you to."
     )
 
@@ -523,11 +545,14 @@ class SaturationTracker:
 
     def opening_question(self, current_date: datetime, recent_date: datetime,
                           agent_fn=None, place_question: Optional[str] = None,
-                          place_remark: Optional[str] = None) -> str:
+                          place_remark: Optional[str] = None,
+                          last_topics: Optional[List[str]] = None) -> str:
         """The very first agent turn, in two parts, in this order -- see this module's own
         docstring: (1) how long it's been since the last conversation, followed by a SUMMARY of
-        every topic (`self.targets`, this human's own full catch-up list, not just a couple of
-        "lead" ones) talked about back then, and only THEN (2) a single, specific question about
+        the topics talked about back then (`last_topics`, find_last_conversation_topics() -- NOT
+        `self.targets`, the full catch-up list, which also holds topics from earlier
+        conversations; the summary is left out when there are none), and only THEN (2) a single,
+        specific question about
         whichever ONE topic most needs catching up on (`_select_topic()` -- the exact same
         selection `next_question()` uses), rather than a bare, generic "what's new?". Marks that
         one topic as asked (`_mark_asked()`) so `next_question()` doesn't immediately ask about it
@@ -535,14 +560,15 @@ class SaturationTracker:
 
         If there's nothing left to ask about at all (e.g. every topic is already covered by data
         pushed through some other channel before this chat even starts), the message still names
-        every topic recapped from last time, just without the trailing specific question.
+        the topics recapped from last time, just without the trailing specific question.
 
         `place_question` -- what to ask about where the human is (e.g. "where they are right
         now"), asked after (2) instead of the topic question; no topic is marked as asked, so
         next_question() starts with it. `place_remark` -- something to say about where they are
         (e.g. that they are at the same place as last time), right after the greeting.
         """
-        all_topics_phrase = ", ".join(t.replace("_", " ") for t in self.targets)
+        last_topics_phrase = ", ".join(t.replace("_", " ") for t in (last_topics or []))
+        last_step = 3 if last_topics_phrase else 2
         activity_type = None if place_question else self._select_topic()
         specific_label = None
         if activity_type is not None:
@@ -557,20 +583,22 @@ class SaturationTracker:
         )
         user_prompt = (
             f"Our last conversation was {gap_description}. "
-            + (f"Back then we talked about: {all_topics_phrase}. " if all_topics_phrase else "")
+            + (f"Back then we talked about: {last_topics_phrase} (and nothing else). "
+               if last_topics_phrase else "")
             + "Write the opening message of today's chat, in this order: (1) greet them and "
             f"mention how long it's been since you last talked{gap_instruction}"
             + (f", and briefly mention {place_remark}" if place_remark else "")
-            + ", (2) in one short sentence, "
-            "summarize the topics you talked about last time"
-            + (f" ({all_topics_phrase})" if all_topics_phrase else "")
+            + (", (2) in one short sentence, summarize the topics you talked about last time "
+               f"({last_topics_phrase}) -- do not mention any other topic"
+               if last_topics_phrase else "")
             + (
-                f", (3) THEN, as a separate follow-up, ask a specific question inviting them to "
+                f", ({last_step}) THEN, as a separate follow-up, ask a specific question inviting them to "
                 f"share what's happened with their {specific_label} since then"
                 if specific_label else ""
             )
-            + (f", (3) THEN ask {place_question}" if place_question else "")
-            + ". Keep it natural and short (2-3 sentences)."
+            + (f", ({last_step}) THEN ask {place_question}" if place_question else "")
+            + ". Keep it natural, short and concise: at most three short sentences and about "
+            "40 words in total; name the topics briefly, without detail."
         )
         messages = [
             {"role": "system", "content": _catch_up_system_prompt(self.human)},
