@@ -268,7 +268,7 @@ def name_in_utterance(utterance: str, known: List[str], agent_fn=None,
         {"role": "user", "content": utterance},
     ]
     try:
-        raw = _call_openai("working out your name", agent_fn or _default_reply_fn(model), messages) or ""
+        raw = _call_openai("working out your name", agent_fn or _default_reply_fn(model, decision=True), messages) or ""
     except Exception:
         logger.exception("Failed to work out the name in %r", utterance)
         return None
@@ -550,7 +550,7 @@ def _is_recap_request(utterance: str, agent_fn=None, model: str = DEFAULT_MODEL)
         )},
         {"role": "user", "content": utterance},
     ]
-    reply_fn = agent_fn or _default_reply_fn(model)
+    reply_fn = agent_fn or _default_reply_fn(model, decision=True)
     raw = (_call_openai("checking whether you're asking for a recap", reply_fn, messages) or "")
     return raw.strip().upper().startswith("YES")
 
@@ -566,9 +566,12 @@ def _format_gap_description(current_date: datetime, recent_date: datetime) -> st
     return f"{days} days ago, on {recent_date.strftime('%A, %B %d')}"
 
 
-def _default_reply_fn(model: str):
+def _default_reply_fn(model: str, decision: bool = False):
+    """A reply function on the configured LLM; `decision` for a classification (see
+    llm_backend.decision_sampling())."""
+    extra = llm_backend.decision_sampling() if decision else {}
     return lambda messages: _openai_client().chat.completions.create(
-        model=llm_backend.model(model), messages=messages
+        model=llm_backend.model(model), messages=messages, **extra
     ).choices[0].message.content
 
 

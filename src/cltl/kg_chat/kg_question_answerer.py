@@ -618,7 +618,8 @@ class KgQuestionAnswerer:
         return kg_gap_finder.run_query(self._graph, query)
 
     def _openai_complete(self, messages: List[Dict], json_mode: bool = False) -> str:
-        kwargs = {"response_format": {"type": "json_object"}} if json_mode else {}
+        # A JSON reply is the planner's decision, see llm_backend.decision_sampling().
+        kwargs = {"response_format": {"type": "json_object"}, **llm_backend.decision_sampling()} if json_mode else {}
         response = _openai_client().chat.completions.create(model=llm_backend.model(self.model),
                                                             messages=messages, **kwargs)
 

@@ -176,7 +176,8 @@ class CatchUpConversation(Conversation):
         if len(subjects) > 1:
             logger.info("Utterance added triples about %s, visualising %s", subjects, subjects[0])
 
-        return graphdb_visualization_url(self._kg_address, subjects[0]) if subjects else None
+        # Embedded: the chat UI shows the page inside itself.
+        return graphdb_visualization_url(self._kg_address, subjects[0], embedded=True) if subjects else None
 
     def _answer_confirmation(self, utterance: str) -> str:
         decision = self._place_decision
@@ -326,7 +327,7 @@ class AskNameConversation(Conversation):
 
     def _name_in(self, utterance: str) -> Optional[str]:
         return self._catch_up.name_in_utterance(
-            utterance, self._known, agent_fn=self._chat_sessions.openai_agent(self._model))
+            utterance, self._known, model=self._model)
 
 
 class CatchUpConversationFactory(ConversationFactory):

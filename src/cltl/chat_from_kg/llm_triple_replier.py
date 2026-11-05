@@ -58,13 +58,15 @@ class LLMTripleReplier():
         else:
             raise ValueError(f"Unknown backend {backend!r}, expected 'ollama' or 'openai'")
 
-    def reply(self, prompt) -> str:
+    def reply(self, prompt, **request) -> str:
         """Send one [instruct, content] prompt -- as built by PromptProcessor's get_*_prompt
         methods, e.g. get_all_prompt_input_from_response() or get_prompt_for_kg_gap() -- to
-        this replier's LLM backend and return the plain-text reply."""
+        this replier's LLM backend and return the plain-text reply. `request` -- extra request
+        parameters, e.g. temperature=0 for a classification (backend="openai" only)."""
         if self._backend == "ollama":
             return self._ollama_client.invoke(prompt).content
-        response = self._openai_client.chat.completions.create(model=self._openai_model, messages=prompt)
+        response = self._openai_client.chat.completions.create(model=self._openai_model, messages=prompt,
+                                                               **request)
         return response.choices[0].message.content
 
 

@@ -1,5 +1,6 @@
 import copy
 import json
+from datetime import datetime
 import os
 import re
 from openai import OpenAI
@@ -131,6 +132,17 @@ class SRLAnnotations(BaseModel):
         }
 
 
+def _weekday(date) -> Optional[str]:
+    """The weekday of a conversation date as the sessions write it ("2026,Nov,05", or ISO
+    "2026-11-05"), or None when it is not such a date."""
+    for fmt in ("%Y,%b,%d", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(str(date), fmt).strftime("%A")
+        except ValueError:
+            continue
+    return None
+
+
 def _anchored_activity_schema() -> dict:
     """SRLAnnotations' JSON schema with every activity's value, offset, length and type required
     and non-null -- for LLM_EventExtraction(tool_calls=False), whose output a local server
@@ -151,6 +163,26 @@ def _anchored_activity_schema() -> dict:
     return schema
 
 
+# Added to the extraction instructions for a smaller (local) model, with extra_rules=True: the
+# mistakes Qwen3-30B made in a real session (see tests/extraction_cases.json) -- negations stored
+# as confirmed, "I think" as certain, the object of an activity left out, and a new activity
+# folded into the previous one under its activity_id.
+EXTRA_RULES = """
+
+Extra rules -- check every extraction against them:
+1. Negation: when the speaker says something did NOT happen ("I didn't take", "I skipped", "I
+   forgot", "I never", "no ...", "not ..."), the factuality is "deny", not "confirm".
+2. Hedging: "I think", "maybe", "probably", "I guess", "not sure" make the certainty "uncertain".
+3. Plans and expectations ("I will", "I'm going to", "tomorrow I") have factuality "expect".
+4. Always extract what an activity is about as its patient: the medicine ("insulin"), the food
+   or drink ("tea", "pasta"), the measurement ("blood sugar"). Do not leave it out.
+5. A new activity gets a NEW activity_id (the next free number in this chat). Reuse an earlier
+   activity_id ONLY when the speaker clearly talks about that same activity again, and then with
+   exactly the same type. Eating, drinking, taking medicine and a condition such as hunger or
+   tiredness are always different activities.
+6. Resolve relative dates ("yesterday", "on Monday", "last week") from the conversation date and
+   its weekday given with each input; "on Monday" is the most recent Monday on or before it."""
+
 DEFAULT_TIMEOUT = 60.0  # seconds -- see the `timeout` parameter docstring below
 DEFAULT_MODEL = "gpt-5.1"
 
@@ -159,8 +191,14 @@ class LLM_EventExtraction:
 
     def __init__(self, timeout: float = DEFAULT_TIMEOUT, api_key: Optional[str] = None,
                  base_url: Optional[str] = None, model: str = DEFAULT_MODEL,
-                 tool_calls: bool = True, history_turns: Optional[int] = None):
+                 tool_calls: bool = True, history_turns: Optional[int] = None,
+                 temperature: Optional[float] = None, extra_rules: bool = False):
         """
+        :param temperature: sampling temperature of the extraction calls; None leaves the
+            server's default. 0 makes a local server (llama-server samples at ~0.8 by default)
+            give the same extraction for the same input.
+        :param extra_rules: append EXTRA_RULES to the extraction instructions, for a model that
+            needs them spelled out (a local one).
         :param api_key, base_url: another OpenAI-compatible server, such as llama.cpp's
             llama-server (base_url "http://localhost:8080/v1"), and its key. Default:
             OPENAI_API_KEY and OpenAI itself.
@@ -186,8 +224,10 @@ class LLM_EventExtraction:
         self._model = model
         self._tool_calls = tool_calls
         self._history_turns = history_turns
+        self._sampling = {} if temperature is None else {"temperature": temperature}
         self._history = []
-        self._instruct = [{"role": "system", "content": prompts.prompt_conversational_srl_annotation}]
+        instructions = prompts.prompt_conversational_srl_annotation + (EXTRA_RULES if extra_rules else "")
+        self._instruct = [{"role": "system", "content": instructions}]
         self._known_activities = {}
 
     def process_input(self, turn):
@@ -210,7 +250,8 @@ class LLM_EventExtraction:
             model=self._model,
             messages=messages,
             tools=[function_schema],
-            tool_choice = "required"  # Force function call otherwise use :auto"
+            tool_choice = "required",  # Force function call otherwise use :auto"
+            **self._sampling,
         )
 
         # 5. Process the response
@@ -279,6 +320,7 @@ class LLM_EventExtraction:
             messages=messages,
             response_format={"type": "json_schema", "json_schema": {
                 "name": "extract_events", "schema": _anchored_activity_schema(), "strict": True}},
+            **self._sampling,
         )
         content = response.choices[0].message.content or ""
         self._history.append({"role": "assistant", "content": content})
@@ -287,6 +329,27 @@ class LLM_EventExtraction:
         except Exception as e:
             print("Error parsing JSON output:", e)
             return None
+
+    def _split_reused_ids(self, chat_number, extractions):
+        """An activity_id from an earlier turn, reused with a DIFFERENT type, is a new activity
+        the model folded into an earlier one (a local model did: "I drink tea" became part of
+        "I didn't take insulin", "I eat three times a day" part of "I'm hungry"). Such an
+        extraction gets the next free id of this chat instead, in place. Reuse with the same type
+        is left alone: that is the same activity talked about again."""
+        used = [int(m.group(2)) for m in (ACTIVITY_ID_PATTERN.match(i) for i in self._known_activities) if m]
+        used += [int(m.group(2)) for m in (ACTIVITY_ID_PATTERN.match(e.activity.activity_id or "")
+                                           for e in extractions) if m]
+        next_number = max(used, default=0) + 1
+        for extraction in extractions:
+            activity = extraction.activity
+            known_type = self._known_activities.get(activity.activity_id)
+            if activity.value is None or activity.type is None or known_type is None or activity.type == known_type:
+                continue
+            new_id = f"chat{chat_number}.{next_number}"
+            print(f"Activity '{activity.value}' ({activity.type.value}) reused {activity.activity_id} "
+                  f"({known_type.value}); made it {new_id}")
+            activity.activity_id = new_id
+            next_number += 1
 
     def check_compliance(self, chat_number, utterance, extractions):
         """Validate a turn's extractions against the annotations.json Output-entry schema.
@@ -418,6 +481,8 @@ class LLM_EventExtraction:
             "chat": chat,
             "human": human,
             "date": date,
+            # For "on Monday": the model cannot work out the weekday of a date reliably itself.
+            **({"weekday": _weekday(date)} if _weekday(date) else {}),
             "turn": turn['turn'],
             "speaker": turn['speaker'],
             "utterance": turn['utterance'],
@@ -426,6 +491,7 @@ class LLM_EventExtraction:
         response = self.process_input(turn_with_context)
         if not response:
             return None
+        self._split_reused_ids(chat, response)
         issues = self.check_compliance(chat, turn['utterance'], response)
         if issues:
             print(f"Compliance issues for chat {chat} turn {turn['turn']}:")

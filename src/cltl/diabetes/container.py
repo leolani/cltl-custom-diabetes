@@ -59,6 +59,7 @@ def _configure_llm(config):
         base_url=_str(config, "llm_base_url") if _str(config, "llm_backend") == llm_backend.LOCAL else None,
         model=_str(config, "model"),
         timeout=_float(config, "llm_timeout", 0) or None,
+        tool_calls=config.get_boolean("llm_tool_calls") if _str(config, "llm_tool_calls") else False,
     )
     description = llm_backend.describe()
     if "NOT REACHABLE" in description:

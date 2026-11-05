@@ -134,3 +134,54 @@ Caveats:
 - Use the "Instruct" builds of Qwen3. The plain Qwen3 builds write out their reasoning first, which adds delay and can break the JSON output.
 - gpt-oss needs --jinja. I haven't checked that the JSON-schema mode the extractor uses works with its reasoning output. Test it before relying on it.
 - Judge on your own conversations. Generic benchmarks matter less here. The best check is the same few extraction and question tests on a handful of real Jan utterances for each model.
+
+
+Use Qwen for the conversation, not for event extraction. Extraction needs a stronger model: OpenAI, or a bigger local one.
+
+What Qwen3-30B did well today:
+- Dialogue: short, natural replies of 1–2 sentences. The catch-up opening, the place question, the intent follow-ups, the one-sentence summaries and the exploration questions all read fine.
+- Answers from the knowledge graph: "What do I drink normally?", the "Want the details?" short answers, and the life summary, once the code-fence fix was in.
+- Speed: about 1–3 s per reply, 4–14 s per turn that's extracted and stored.
+- Cost and privacy: nothing leaves the machine. For health data that's a real advantage.
+
+Where it failed: extraction, which writes the knowledge graph for good
+
+┌───────────────────────────────────────┬─────────────────────────────────────────────┐
+│             What was said             │               What was stored               │
+├───────────────────────────────────────┼─────────────────────────────────────────────┤
+│ "I think I didn't take any insulin"   │ took medication, CERTAIN, without "insulin" │
+├───────────────────────────────────────┼─────────────────────────────────────────────┤
+│ "skipped my metformin"                │ confirmed                                   │
+├───────────────────────────────────────┼─────────────────────────────────────────────┤
+│ drinks (tea, water, beer)             │ merged into the insulin activity            │
+├───────────────────────────────────────┼─────────────────────────────────────────────┤
+│ "I eat three times a day" + the foods │ merged into the hunger activity             │
+├───────────────────────────────────────┼─────────────────────────────────────────────┤
+│ "on Monday"                           │ the wrong date                              │
+└───────────────────────────────────────┴─────────────────────────────────────────────┘
+
+These errors don't stay in one reply. They end up in the timeline and the life summary, and they steer later questions: "What medication did you take?" right after "I didn't take any".
+
+It also needed code workarounds, all now in place:
+- a stricter extraction format, because otherwise it returned no activities at all;
+- reading JSON out of code fences;
+- a cue filter for the recap classifier, which said YES to "At lunch, 1pm" in 10% of tries.
+
+Some of that comes from llama-server's default sampling (temperature about 0.8), which makes yes/no and JSON decisions unstable.
+
+What I couldn't compare. OpenAI had no credits today, so I have no side-by-side run with gpt-5.1. The judgement on OpenAI rests on how the extraction behaved before today, when it ran on gpt-5.1 with tool calls. I didn't measure it today.
+
+Recommendation:
+1. Split the backend: extraction on OpenAI, everything else on local Qwen. That's one extra setting (extraction_backend) and a small change; the bulk of the calls, and most of the data, stay local.
+2. If everything must stay local:
+   - run extraction on a stronger local model, such as gpt-oss-120b, which fits in your 128 GB, or Qwen3-Next-80B;
+   - start llama-server with --jinja, so extraction can use real tool calls as with OpenAI;
+   - use temperature 0 for the classification and extraction calls.
+
+   I'd test that on a handful of utterances like today's before relying on it.
+3. Fix the issues that aren't about the model at all, whichever you choose: catch-up topics mixing people's data, and quit words being ignored.
+
+
+ llama-server -hf unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF:Q8_0 --jinja --port 8080 -c 16384
+
+

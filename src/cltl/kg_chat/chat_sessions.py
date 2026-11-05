@@ -501,8 +501,11 @@ class KgChatSession(ChatSession):
             timeout=llm_backend.timeout(DEFAULT_OPENAI_TIMEOUT),
             api_key=llm_backend.api_key(), base_url=llm_backend.base_url(),
             model=llm_backend.model(DEFAULT_MODEL),
-            tool_calls=not llm_backend.is_local(),
+            tool_calls=llm_backend.extraction_tool_calls(),
             history_turns=llm_backend.DEFAULT_LOCAL_HISTORY_TURNS if llm_backend.is_local() else None,
+            # Workarounds for a local model, see llm_event_triples_openai_pydantic.EXTRA_RULES.
+            temperature=llm_backend.decision_sampling().get("temperature"),
+            extra_rules=llm_backend.is_local(),
         )
         self.replier = replier if replier is not None else deps["LLMTripleReplier"](
             backend="openai", timeout=llm_backend.timeout(DEFAULT_OPENAI_TIMEOUT),
@@ -941,7 +944,8 @@ class KgChatSession(ChatSession):
         unverified triple to the KG, only asks the human to clarify."""
         prompt = self.replier._processor.get_prompt_for_confirmation_response(question, reply_text)
         raw = (_call_openai(
-            "interpreting your answer to the confirmation question", self.replier.reply, prompt
+            "interpreting your answer to the confirmation question", self.replier.reply, prompt,
+            **llm_backend.decision_sampling()
         ) or "").strip()
         upper = raw.upper()
         if upper.startswith("CONFIRM"):
@@ -1155,7 +1159,8 @@ class KgChatSession(ChatSession):
         through the ordinary extraction pipeline instead."""
         prompt = self.replier._processor.get_prompt_for_intent_answer_response(question, reply_text)
         raw = (_call_openai(
-            "interpreting your answer to the follow-up question", self.replier.reply, prompt
+            "interpreting your answer to the follow-up question", self.replier.reply, prompt,
+            **llm_backend.decision_sampling()
         ) or "").strip()
         upper = raw.upper()
         if upper.startswith("ANSWER"):

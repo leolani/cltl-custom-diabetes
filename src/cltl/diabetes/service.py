@@ -194,25 +194,30 @@ class DiabetesService:
 
         try:
             self._event_bus.publish(self._status_topic, Event.for_scenario_payload(
-                scenario_id, StatusEvent("Loading the memory from the KG", "memory", progress=0.5, key="agent.model")))
+                scenario_id, StatusEvent("Started processing the utterance", "NLU", progress=0.5, key="agent.model")))
             response, graph_uri = self._conversations[scenario_id].respond(text)
+            logger.info("Response %r in scenario %s", response, scenario_id)
+            if graph_uri:
+                logger.info("Graph URI %r, for topic %s", graph_uri, self._graph_topic)
+
             self._event_bus.publish(self._status_topic, Event.for_scenario_payload(
-                scenario_id, StatusEvent("Loading the memory from the KG", "memory", progress=0.5, key="agent.model")))
+                scenario_id, StatusEvent("Done processing the utterance", "NLU", progress=0.5, key="agent.model")))
         except Exception:
             logger.exception("Failed to respond to %r in scenario %s", text, scenario_id)
             response, graph_uri = ERROR_REPLY, None
         if response:
             self._publish(response, scenario_id, event)
+        
         if graph_uri and self._graph_topic:
             displayEvent = DisplayEvent(graph_uri,"Monitoring")
             self._event_bus.publish(self._graph_topic, Event.for_scenario_payload(scenario_id,displayEvent))
            # self._publish(graph_uri, scenario_id, event, topic=self._graph_topic)
             self._event_bus.publish(self._status_topic, Event.for_scenario_payload(
-                scenario_id, StatusEvent("Loading the memory from the KG", "KG", progress=0.5, key="kg.model")))
+                scenario_id, StatusEvent("KG response", "KG", progress=0.5, key="kg.model")))
         elif response:
-            logger.warning("No graph_uri in response to %r in scenario %s", text, scenario_id)
+            logger.info("No graph_uri in response to %r in scenario %s", text, scenario_id)
             self._event_bus.publish(self._status_topic, Event.for_scenario_payload(
-                scenario_id, StatusEvent("This is a response from reasoning over the KG", "LLM", progress=0.5, key="llm.model")))
+                scenario_id, StatusEvent("LLM response", "LLM", progress=0.5, key="llm.model")))
 
     def _open(self, scenario_id: str, event: Event):
         human = self._speakers.get(scenario_id, self._human)
