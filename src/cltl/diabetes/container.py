@@ -8,6 +8,7 @@ from cltl.diabetes import place
 from cltl.diabetes.api import ConversationFactory
 from cltl.diabetes.catchup import CatchUpConversationFactory, connect_ltm
 from cltl.diabetes.service import DiabetesService
+from cltl.kg_chat import llm_backend
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,27 @@ def _float(config, key: str, default: float) -> float:
     return float(config.get(key)) if key in config and config.get(key) else default
 
 
+def _str(config, key: str) -> Optional[str]:
+    """`key`'s value, None when unset, empty or an unset "$VAR"."""
+    value = config.get(key) if key in config else None
+    return value.strip() if value and value.strip() and not value.startswith("$") else None
+
+
+def _configure_llm(config):
+    """OpenAI or a local OpenAI-compatible server (llama-server), see llm_backend."""
+    llm_backend.configure(
+        backend=_str(config, "llm_backend") or llm_backend.OPENAI,
+        base_url=_str(config, "llm_base_url") if _str(config, "llm_backend") == llm_backend.LOCAL else None,
+        model=_str(config, "model"),
+        timeout=_float(config, "llm_timeout", 0) or None,
+    )
+    description = llm_backend.describe()
+    if "NOT REACHABLE" in description:
+        logger.warning("LLM: %s -- start llama-server first, or set llm_backend: openai", description)
+    else:
+        logger.info("LLM: %s", description)
+
+
 class DiabetesContainer(InfraContainer):
     """Wires the knowledge graph driven conversation into a deployment.
 
@@ -59,6 +81,7 @@ class DiabetesContainer(InfraContainer):
         config = self.config_manager.get_config("cltl.diabetes")
         kg_address = _kg_address(config)
         logger.info("Knowledge graph: %s", kg_address)
+        _configure_llm(config)
 
         return CatchUpConversationFactory(
             kg_address=kg_address,
@@ -69,6 +92,7 @@ class DiabetesContainer(InfraContainer):
             max_answer_words=_max_answer_words(config),
             place_same_threshold=_float(config, "place_same_threshold", place.DEFAULT_SAME_THRESHOLD),
             place_ask_threshold=_float(config, "place_ask_threshold", place.DEFAULT_ASK_THRESHOLD),
+            ask_name=config.get_boolean("ask_name") if "ask_name" in config else False,
         )
 
     @property

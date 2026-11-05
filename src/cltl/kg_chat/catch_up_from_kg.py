@@ -77,14 +77,19 @@ Module contents:
 """
 
 import json
+import logging
 import math
+import random
 import re
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from cltl.kg_chat import llm_backend
 from cltl.kg_chat.chat_sessions import DEFAULT_GAP_ACTIVITY_TYPES, DEFAULT_MODEL, _call_openai, _openai_client
+
+logger = logging.getLogger(__name__)
 
 
 def _find_repo_src_dir() -> Path:
@@ -180,6 +185,99 @@ def find_last_conversation_date(human: str, brain, current_date: datetime,
     )
 
 
+# Everyone with an utterance in a chat, with how many chats they spoke in. The agent itself is one
+# of them (friends/agent) and is left out by find_known_humans().
+KNOWN_HUMANS_QUERY = """
+PREFIX grasp: <http://groundedannotationframework.org/grasp#>
+PREFIX sem: <http://semanticweb.cs.vu.nl/2009/11/sem/>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+select ?actor ?name (COUNT(DISTINCT ?chat) as ?chats) where {
+    ?chat rdf:type grasp:Chat ; sem:hasSubEvent ?u .
+    ?u sem:hasActor ?actor .
+    ?actor rdfs:label ?name .
+} GROUP BY ?actor ?name ORDER BY DESC(?chats)
+"""
+
+AGENT_URI = "http://cltl.nl/leolani/friends/agent"
+
+
+def find_known_humans(brain) -> List[str]:
+    """The names of everyone the agent has had a chat with, most chats first. A person can carry
+    the same label in several spellings ("Jan", "jan"); the one starting with a capital is kept,
+    as that is the one the other queries (e.g. get_all_utterances()) match on."""
+    names: Dict[str, str] = {}
+    for row in brain._submit_query(KNOWN_HUMANS_QUERY):
+        actor, name = row["actor"]["value"], row["name"]["value"].strip()
+        if actor == AGENT_URI or not name:
+            continue
+        if actor not in names or (name[:1].isupper() and not names[actor][:1].isupper()):
+            names[actor] = name
+    return list(names.values())
+
+
+# How the activity types read in what the agent says, instead of "take drink" or "social
+# condition"; a type not listed reads as its own name with spaces.
+TOPIC_PHRASES = {
+    "take_food": "food", "take_drink": "drinks", "take_medicine": "medication",
+    "medication": "medication", "measurement": "blood sugar measurements", "exercise": "exercise",
+    "sleep": "sleep", "diet": "diet", "treatment": "treatment", "symptom": "symptoms",
+    "physical_condition": "physical health", "mental_condition": "mood",
+    "social_condition": "social life", "social": "social life",
+}
+
+
+def topic_phrase(activity_type: str) -> str:
+    return TOPIC_PHRASES.get(activity_type, activity_type.replace("_", " "))
+
+
+def topics_phrase(activity_types) -> str:
+    """The topics, each once, in plain words: "food, drinks and mood"."""
+    phrases = list(dict.fromkeys(topic_phrase(t) for t in activity_types))
+    if len(phrases) <= 1:
+        return "".join(phrases)
+    return ", ".join(phrases[:-1]) + " and " + phrases[-1]
+
+
+NAME_RETRY_QUESTION = "Sorry, I didn't catch your name. What is it?"
+
+
+def known_humans_opening(known: List[str]) -> str:
+    """The first agent turn when the human's name is not known yet: everyone the agent has talked
+    with (find_known_humans()) and the question who it is talking to now."""
+    if not known:
+        return "Hi! I don't know anyone yet. What's your name?"
+    names = known[0] if len(known) == 1 else ", ".join(known[:-1]) + " and " + known[-1]
+    return f"Hi! I know {names} from earlier conversations. What's your name?"
+
+
+def name_in_utterance(utterance: str, known: List[str], agent_fn=None,
+                      model: str = DEFAULT_MODEL) -> Optional[str]:
+    """The name in the answer to known_humans_opening(): a known name mentioned in `utterance`
+    (in any case; returned in the knowledge graph's spelling, which the other queries match on),
+    else the name an LLM call finds in it, else None (also when that call fails)."""
+    words = set(re.findall(r"[\w'-]+", utterance.lower()))
+    for name in known:
+        if name.lower() in words:
+            return name
+
+    messages = [
+        {"role": "system", "content": (
+            "The person was asked for their name. Reply with only their first name as they gave "
+            "it, or NONE if the reply does not contain a name.")},
+        {"role": "user", "content": utterance},
+    ]
+    try:
+        raw = _call_openai("working out your name", agent_fn or _default_reply_fn(model), messages) or ""
+    except Exception:
+        logger.exception("Failed to work out the name in %r", utterance)
+        return None
+    name = raw.strip().strip(" .!\"'")
+    if not name or name.upper() == "NONE" or len(name.split()) > 3:
+        return None
+    return next((k for k in known if k.lower() == name.lower()), name)
+
+
 def find_last_conversation_topics(human: str, brain,
                                    activity_types=DEFAULT_GAP_ACTIVITY_TYPES) -> List[str]:
     """The `activity_types` local names `human` themselves mentioned in their LAST chat, in the
@@ -197,6 +295,25 @@ def find_last_conversation_topics(human: str, brain,
         if local_name in wanted and local_name not in topics:
             topics.append(local_name)
     return topics
+
+
+def find_topic_recency(human: str, brain, activity_types=DEFAULT_GAP_ACTIVITY_TYPES) -> Dict[str, datetime]:
+    """For each of `activity_types` that `human` themselves ever talked about: when they last did.
+    SaturationTracker asks about the topics not discussed yet in this conversation most recent
+    first (see its exploration phase). {} for someone the agent never talked with."""
+    deps = _load_gaps_from_kg()
+    wanted = set(activity_types)
+    recency = {}
+    for row in brain._submit_query(deps["thought_util"].get_topic_recency_query(human)):
+        local_name = row["type"]["value"].rsplit("/", 1)[-1]
+        if local_name not in wanted:
+            continue
+        try:
+            last = datetime.fromisoformat(row["last"]["value"])
+        except ValueError:
+            continue
+        recency[local_name] = max(last, recency.get(local_name, last))
+    return recency
 
 
 # The baseline unit find_catch_up_topics() measures history against: a WEEKLY average, always --
@@ -397,6 +514,13 @@ def _recap_system_prompt(human: str) -> str:
     )
 
 
+# Words without which a message is never a request to recap the conversation (see
+# _is_recap_request()): "what did we discuss", "remind me what we covered", "recap", "so far", ...
+_RECAP_CUES = re.compile(
+    r"\b(discuss\w*|talk\w*|talked|covered|cover|recap\w*|summar\w*|so far|remind|went over|"
+    r"go over|mentioned|said|spoke|chat\w*|conversation|where were we)\b", re.IGNORECASE)
+
+
 def _is_recap_request(utterance: str, agent_fn=None, model: str = DEFAULT_MODEL) -> bool:
     """True if `utterance` (the human's own last message) is asking for a recap of what's been
     discussed -- "tell me what we discussed previously", "what did we talk about?", "can you
@@ -409,6 +533,11 @@ def _is_recap_request(utterance: str, agent_fn=None, model: str = DEFAULT_MODEL)
     is exactly the case this function exists to handle (see wrap_agent_fn_with_saturation_loop(),
     the only caller)."""
     if not utterance or not utterance.strip():
+        return False
+    # Only a message with a recap cue is classified at all: a sampling LLM (llama-server's default
+    # temperature) called YES on an ordinary answer like "At lunch, 1pm" 2 times in 20, and every
+    # such YES replaced the next question with a recap of the whole conversation.
+    if not _RECAP_CUES.search(utterance):
         return False
     messages = [
         {"role": "system", "content": (
@@ -439,7 +568,7 @@ def _format_gap_description(current_date: datetime, recent_date: datetime) -> st
 
 def _default_reply_fn(model: str):
     return lambda messages: _openai_client().chat.completions.create(
-        model=model, messages=messages
+        model=llm_backend.model(model), messages=messages
     ).choices[0].message.content
 
 
@@ -486,7 +615,15 @@ class SaturationTracker:
 
     MAX_ASKS_PER_TOPIC = 3
 
-    def __init__(self, topics: List[Dict], human: str, model: str = DEFAULT_MODEL):
+    def __init__(self, topics: List[Dict], human: str, model: str = DEFAULT_MODEL,
+                 all_topics=DEFAULT_GAP_ACTIVITY_TYPES,
+                 topic_recency: Optional[Dict[str, datetime]] = None,
+                 rng: Optional[random.Random] = None):
+        """`topics` -- the catch-up targets (find_catch_up_topics()). Once those are done, the
+        EXPLORATION phase asks once about each of `all_topics` that has not come up in this
+        conversation yet -- also topics this person never talked about -- the ones they talked
+        about most recently first (`topic_recency`, find_topic_recency()), the others in random
+        order (`rng`). Only then is the tracker saturated and does the conversation wrap up."""
         self.targets: Dict[str, Dict] = {t["activity_type"]: t for t in topics}
         self.reported: Dict[str, int] = {
             t: target["initial_reported_count"] for t, target in self.targets.items()
@@ -502,6 +639,17 @@ class SaturationTracker:
         # Set by wrap_up_message() the first time it runs -- see its own docstring and
         # wrap_agent_fn_with_saturation_loop() for why this must only ever fire once.
         self.wrapped_up = False
+        # Every activity type reported this session, targeted or not.
+        self.discussed: set = set()
+        # Topics asked about in the exploration phase, see _next_exploration_topic().
+        self.explored: List[str] = []
+        recency = topic_recency or {}
+        unknown = [t for t in all_topics if t not in recency]
+        (rng or random.Random()).shuffle(unknown)
+        self.topic_recency = recency
+        self.exploration_order: List[str] = (
+            sorted((t for t in all_topics if t in recency), key=lambda t: recency[t], reverse=True)
+            + unknown)
 
     def record_new_activity(self, subject_uri: str, activity_type: str) -> None:
         """Call whenever a NEW activity/condition of `activity_type` is pushed to the KG during
@@ -510,6 +658,7 @@ class SaturationTracker:
         straight through as `on_new_subject=tracker.record_new_activity`; `subject_uri` itself
         isn't used for anything here (this tracker only ever counts BY type). A no-op for any
         type this tracker isn't targeting (not one of find_catch_up_topics()'s own topics)."""
+        self.discussed.add(activity_type)
         if activity_type in self.reported:
             self.reported[activity_type] += 1
 
@@ -522,12 +671,47 @@ class SaturationTracker:
         ]
 
     def is_saturated(self) -> bool:
-        """True once there's nothing left worth asking about -- see _remaining()."""
-        return not self._remaining()
+        """True once there's nothing left worth asking about: every catch-up target is met or
+        capped out (_remaining()), and every topic has come up (_next_exploration_topic())."""
+        return not self._remaining() and self._next_exploration_topic() is None
+
+    def _next_exploration_topic(self) -> Optional[str]:
+        """The first topic of exploration_order that has not come up in this conversation yet:
+        not reported, not asked about as a catch-up target, not explored already."""
+        for topic in self.exploration_order:
+            if topic not in self.discussed and not self.asked.get(topic) and topic not in self.explored:
+                return topic
+        return None
 
     def _mark_asked(self, activity_type: str) -> None:
         self.asked[activity_type] += 1
-        self.asked_log.append({"activity_type": activity_type, "attempt": self.asked[activity_type]})
+        self.asked_log.append({"activity_type": activity_type, "attempt": self.asked[activity_type],
+                               "phase": "catch_up"})
+
+    def _explore(self, agent_fn=None, messages: Optional[List[Dict]] = None) -> Optional[str]:
+        """The exploration phase of next_question(): one question about a topic that has not
+        come up yet, or None when every topic has."""
+        topic = self._next_exploration_topic()
+        if topic is None:
+            return None
+        self.explored.append(topic)
+        self.asked_log.append({"activity_type": topic, "attempt": 1, "phase": "explore"})
+        label = topic_phrase(topic)
+        last = self.topic_recency.get(topic)
+        user_prompt = (
+            (f"{self.human} last told you about their {label} on {last:%A %d %B}, and it has not "
+             f"come up yet today. " if last else
+             f"You have not talked with {self.human} about their {label} yet. ")
+            + f"Ask one short, natural question about their {label} lately. If their last message "
+            "needs a reply, react to it in a few words first."
+        )
+        prompt = (
+            [{"role": "system", "content": _catch_up_system_prompt(self.human)}]
+            + _recent_context(messages)
+            + [{"role": "user", "content": user_prompt}]
+        )
+        reply_fn = agent_fn or _default_reply_fn(self.model)
+        return _call_openai(f"asking about {label}", reply_fn, prompt)
 
     def _select_topic(self) -> Optional[str]:
         """Whichever still-unsaturated topic (see _remaining()) has the biggest shortfall
@@ -546,7 +730,8 @@ class SaturationTracker:
     def opening_question(self, current_date: datetime, recent_date: datetime,
                           agent_fn=None, place_question: Optional[str] = None,
                           place_remark: Optional[str] = None,
-                          last_topics: Optional[List[str]] = None) -> str:
+                          last_topics: Optional[List[str]] = None,
+                          first_meeting: bool = False) -> str:
         """The very first agent turn, in two parts, in this order -- see this module's own
         docstring: (1) how long it's been since the last conversation, followed by a SUMMARY of
         the topics talked about back then (`last_topics`, find_last_conversation_topics() -- NOT
@@ -566,14 +751,19 @@ class SaturationTracker:
         now"), asked after (2) instead of the topic question; no topic is marked as asked, so
         next_question() starts with it. `place_remark` -- something to say about where they are
         (e.g. that they are at the same place as last time), right after the greeting.
+
+        `first_meeting` -- there was no earlier conversation with them: a welcome instead, without
+        any gap or topics from last time (`recent_date` is then only the fallback date).
         """
-        last_topics_phrase = ", ".join(t.replace("_", " ") for t in (last_topics or []))
+        if first_meeting:
+            return self._welcome(agent_fn, place_question=place_question, place_remark=place_remark)
+        last_topics_phrase = topics_phrase(last_topics or [])
         last_step = 3 if last_topics_phrase else 2
         activity_type = None if place_question else self._select_topic()
         specific_label = None
         if activity_type is not None:
             self._mark_asked(activity_type)
-            specific_label = activity_type.replace("_", " ")
+            specific_label = topic_phrase(activity_type)
         gap_description = _format_gap_description(current_date, recent_date)
         gap_days = (current_date.date() - recent_date.date()).days
         # Left to itself, the LLM rounds any gap of a few days up to "about a week".
@@ -585,8 +775,9 @@ class SaturationTracker:
             f"Our last conversation was {gap_description}. "
             + (f"Back then we talked about: {last_topics_phrase} (and nothing else). "
                if last_topics_phrase else "")
-            + "Write the opening message of today's chat, in this order: (1) greet them and "
-            f"mention how long it's been since you last talked{gap_instruction}"
+            + "Write the opening message of today's chat, in this order: (1) start with a "
+            f"greeting by name (\"Hi {self.human}!\") and mention how long it's been since you "
+            f"last talked{gap_instruction}"
             + (f", and briefly mention {place_remark}" if place_remark else "")
             + (", (2) in one short sentence, summarize the topics you talked about last time "
                f"({last_topics_phrase}) -- do not mention any other topic"
@@ -607,6 +798,25 @@ class SaturationTracker:
         reply_fn = agent_fn or _default_reply_fn(self.model)
         return _call_openai("generating the opening catch-up message", reply_fn, messages)
 
+    def _welcome(self, agent_fn=None, place_question: Optional[str] = None,
+                 place_remark: Optional[str] = None) -> str:
+        """opening_question() for someone the agent has never talked with."""
+        user_prompt = (
+            "This is your very first conversation with them; you know nothing about them yet. "
+            "Write the opening message: greet them by name, say in a few words that you are a "
+            "lifestyle coach who would like to hear how their days go"
+            + (f", briefly mention {place_remark}" if place_remark else "")
+            + (f", and ask {place_question}" if place_question else
+               ", and ask how they have been doing lately")
+            + ". Do not suggest you have talked before. At most two short sentences."
+        )
+        messages = [
+            {"role": "system", "content": _catch_up_system_prompt(self.human)},
+            {"role": "user", "content": user_prompt},
+        ]
+        reply_fn = agent_fn or _default_reply_fn(self.model)
+        return _call_openai("generating the welcome message", reply_fn, messages)
+
     def next_question(self, agent_fn=None, messages: Optional[List[Dict]] = None) -> Optional[str]:
         """Ask about whichever still-unsaturated topic (see _select_topic()) has the biggest
         shortfall (expected_count - reported so far), tie-broken by most-recently-discussed --
@@ -619,11 +829,11 @@ class SaturationTracker:
         actually just said instead of being generated in isolation from it."""
         activity_type = self._select_topic()
         if activity_type is None:
-            return None
+            return self._explore(agent_fn, messages)
         target = self.targets[activity_type]
         is_followup = self.asked[activity_type] > 0
         self._mark_asked(activity_type)
-        label = activity_type.replace("_", " ")
+        label = topic_phrase(activity_type)
         if is_followup:
             user_prompt = (
                 f"Earlier {self.human} mentioned {label} (most recently: "
@@ -664,7 +874,7 @@ class SaturationTracker:
         through is what lets the LLM actually notice a signal like that instead of deciding purely
         from the "covered: ..." summary below."""
         self.wrapped_up = True
-        covered = [t.replace("_", " ") for t, target in self.targets.items() if self.reported[t] > 0]
+        covered = [topic_phrase(t) for t, target in self.targets.items() if self.reported[t] > 0]
         covered_phrase = ", ".join(covered) if covered else "nothing new for this period"
         user_prompt = (
             f"You've now caught up on everything worth covering for this period (covered: "
@@ -693,9 +903,9 @@ class SaturationTracker:
         another catch-up question and shouldn't count as one, or consume one of a topic's own
         MAX_ASKS_PER_TOPIC attempts.
         """
-        covered = [t.replace("_", " ") for t, target in self.targets.items() if self.reported[t] > 0]
+        covered = [topic_phrase(t) for t, target in self.targets.items() if self.reported[t] > 0]
         still_open = [
-            t.replace("_", " ") for t, target in self.targets.items()
+            topic_phrase(t) for t, target in self.targets.items()
             if self.reported[t] < target["expected_count"] and self.asked[t] < self.MAX_ASKS_PER_TOPIC
         ]
         covered_phrase = ", ".join(covered) if covered else "nothing yet this time"
@@ -740,7 +950,11 @@ def wrap_agent_fn_with_saturation_loop(agent_fn, tracker: SaturationTracker):
     isn't itself another catch-up question.
     """
     def _wrapped(messages):
-        last_utterance = messages[-1]["content"] if messages else None
+        # The HUMAN's last message, not messages[-1]: a caller can end the list with an
+        # instruction of its own (chat_sessions.KgChatSession._continue_after_ack() does), which
+        # the recap classifier took for a request to recap -- so every finished intent ended
+        # with a summary of everything discussed so far.
+        last_utterance = next((m["content"] for m in reversed(messages or []) if m.get("role") == "user"), None)
         if last_utterance and _is_recap_request(last_utterance):
             return tracker.recap_message(messages=messages)
         if not tracker.is_saturated():
@@ -866,6 +1080,9 @@ def save_intent_log(kg_session, tracker: "SaturationTracker", catch_up_topics: L
             "asked_log": tracker.asked_log,
             "saturated": tracker.is_saturated(),
             "wrapped_up": tracker.wrapped_up,
+            # The exploration phase: topics asked about because they had not come up yet.
+            "explored": tracker.explored,
+            "discussed": sorted(tracker.discussed),
         },
         "intents_covered": _intents_covered_from_turn_log(getattr(kg_session, "turn_log", None) or []),
     }

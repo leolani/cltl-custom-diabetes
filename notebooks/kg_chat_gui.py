@@ -111,7 +111,7 @@ import webbrowser
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
-from tkinter import font as tkfont, scrolledtext, ttk
+from tkinter import filedialog, font as tkfont, scrolledtext, ttk
 
 DEFAULT_QUIT_WORDS = ("quit", "exit", "goodbye", "bye", "stop")
 
@@ -205,6 +205,8 @@ TIMELINE_PERIODS = (
     ("6 months", 182), ("1 year", 365), ("everything", None),
 )
 TIMELINE_DPI = 100
+# The resolution of a timeline saved as PNG (see ChatWindow._save_timeline()).
+TIMELINE_SAVE_DPI = 200
 TIMELINE_MIN_WIDTH_INCHES = 4.5
 
 # Node-link diagram colors (see ChatWindow._render_graph()) -- picked to read clearly on the
@@ -719,9 +721,29 @@ class ChatWindow:
         source = reply_sources[-1] if reply_sources else None
         self._append_turn(agent_turn["speaker"], agent_turn["utterance"], source)
         self._apply_graph_update(graph_update)
-        if self._timeline_visible:
+        if self._show_memory():
+            pass  # the timeline is being drawn already
+        elif self._timeline_visible:
             self._refresh_timeline()
         self._ready_for_input()
+
+    def _show_memory(self) -> bool:
+        """For a session that finds out who it is talking to during the chat (e.g.
+        name_first_session.NameFirstCatchUpSession): once it has looked up what the knowledge
+        graph remembers of that person -- it then has a `last_conversation_date` -- name them in
+        the title and show their timeline, with the last conversation marked. True if it did."""
+        memory_date = getattr(self.session, "last_conversation_date", None)
+        if memory_date is None or memory_date == self.last_conversation_date:
+            return False
+        self.last_conversation_date = memory_date
+        self.root.title(f"Leolani KG Chat — {self.session.human} ({self.session.date})")
+        if not self._show_graph_panel:
+            return False
+        if self._timeline_visible:
+            self._refresh_timeline()
+        else:
+            self._toggle_timeline()
+        return True
 
     def _on_reply_error(self, exc):
         if self._closed:
@@ -872,6 +894,8 @@ class ChatWindow:
         self.timeline_period_combo.bind("<Return>", self._on_timeline_period)
         tk.Label(period_frame, text="(or a number of days)", font=("Helvetica", 9),
                  fg="#888888").pack(side="left", padx=(6, 0))
+        self.timeline_save_button = tk.Button(period_frame, text="Save…", command=self._save_timeline)
+        self.timeline_save_button.pack(side="right")
         self.timeline_canvas = tk.Canvas(self.timeline_frame, background=GRAPH_BG, highlightthickness=0)
         timeline_yscroll = ttk.Scrollbar(self.timeline_frame, orient="vertical",
                                          command=self.timeline_canvas.yview)
@@ -1244,15 +1268,10 @@ class ChatWindow:
             return
         import matplotlib.pyplot as plt
         from matplotlib.backends.backend_agg import FigureCanvasAgg
-        from cltl.plots.patient_timeline import mark_regions, plot_patient_timeline
+        from cltl.plots.patient_timeline import mark_regions
 
         width = max(self.timeline_canvas.winfo_width(), 1)
-        fig = plot_patient_timeline(
-            self._timeline_entries, self.session.human, current_date=datetime.now(),
-            days=self._timeline_days, last_conversation_date=self.last_conversation_date,
-            highlight_chat=getattr(self.session, "chat", None),
-            width=max(width / TIMELINE_DPI, TIMELINE_MIN_WIDTH_INCHES),
-        )
+        fig = self._timeline_figure(width)
         plt.close(fig)
         # Drawn on an Agg canvas of its own at the resolution shown, so the regions measured
         # after drawing match the pixels of the PNG exactly.
@@ -1269,6 +1288,48 @@ class ChatWindow:
         self.timeline_canvas.create_image(0, 0, anchor="nw", image=self._timeline_image)
         self.timeline_canvas.configure(scrollregion=(0, 0, self._timeline_image.width(),
                                                      self._timeline_image.height()))
+
+    def _timeline_figure(self, width_pixels):
+        """The timeline as shown: the cached entries, the period of the "Look back" box, the last
+        conversation and this chat marked, `width_pixels` wide on screen."""
+        from cltl.plots.patient_timeline import plot_patient_timeline
+
+        return plot_patient_timeline(
+            self._timeline_entries, self.session.human, current_date=datetime.now(),
+            days=self._timeline_days, last_conversation_date=self.last_conversation_date,
+            highlight_chat=getattr(self.session, "chat", None),
+            width=max(width_pixels / TIMELINE_DPI, TIMELINE_MIN_WIDTH_INCHES),
+        )
+
+    def _save_timeline(self):
+        """"Save…" button: write the timeline as shown to a PNG, PDF or SVG file, chosen in a
+        save dialog (by default in `save_dir`, named after the human and the time)."""
+        if self._timeline_entries is None:
+            self.graph_status_label.configure(text="nothing to save yet: the timeline is still loading")
+            return
+        directory = Path(self.save_dir or DEFAULT_SAVE_DIR)
+        directory.mkdir(parents=True, exist_ok=True)
+        human = re.sub(r"[^A-Za-z0-9_.-]", "_", str(self.session.human))
+        path = filedialog.asksaveasfilename(
+            parent=self.root, title="Save the timeline",
+            initialdir=str(directory),
+            initialfile=f"timeline_{human}_{datetime.now():%Y%m%d-%H%M%S}.png",
+            defaultextension=".png",
+            filetypes=[("PNG image", "*.png"), ("PDF document", "*.pdf"), ("SVG image", "*.svg")],
+        )
+        if not path:
+            return  # cancelled
+        import matplotlib.pyplot as plt
+
+        fig = self._timeline_figure(max(self.timeline_canvas.winfo_width(), 1))
+        try:
+            fig.savefig(path, dpi=TIMELINE_SAVE_DPI, bbox_inches="tight")
+            self.graph_status_label.configure(text=f"saved the timeline to {path}")
+            print(f"Saved the timeline to {path}")
+        except Exception as exc:  # e.g. no write permission, or an unknown extension
+            self.graph_status_label.configure(text=f"couldn't save the timeline: {exc}")
+        finally:
+            plt.close(fig)
 
     def _timeline_entry_at(self, event):
         """The entry whose mark is under the mouse, or None; where marks overlap (a dot on a

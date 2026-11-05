@@ -1,7 +1,10 @@
 """Draw the dialogue decision process of notebooks/kg_catchup_intent_chat.ipynb as a Graphviz flowchart.
 
-Follows KgIntentChatSession.say() (src/cltl/kg_chat/chat_sessions.py) and
-wrap_agent_fn_with_saturation_loop() / SaturationTracker (src/cltl/kg_chat/catch_up_from_kg.py).
+Follows NameFirstCatchUpSession (src/cltl/kg_chat/name_first_session.py; in src/main.py:
+AskNameConversation/CatchUpConversation, src/cltl/diabetes/catchup.py), KgIntentChatSession.say()
+(src/cltl/kg_chat/chat_sessions.py) and wrap_agent_fn_with_saturation_loop() / SaturationTracker
+(src/cltl/kg_chat/catch_up_from_kg.py). Every LLM call goes to OpenAI or a local llama-server
+(llm_backend; `llm_backend` in config/default.config, LLM_BACKEND in the notebook).
 
 Needs the Graphviz binaries (`brew install graphviz`) and the `graphviz` Python package.
 
@@ -43,22 +46,33 @@ def decision(sg, name, text):
 
 # ---------------- Before the chat ----------------
 with g.subgraph(name="cluster_setup") as c:
-    c.attr(label="Before the chat (queries on the KG)", style="dashed,filled", fillcolor="#f3f6fa",
-           color="#b8c4d6", fontname="Helvetica-Oblique", fontsize="11", labeljust="l")
-    c.node("last", "Find last conversation date\nwith HUMAN\n(fallback: 7 days ago)", fillcolor=C_SETUP)
-    c.node("topics", "Find catch-up topics:\nweekly rate per activity type\n-> target for the period\n(period capped at 14 days)",
+    c.attr(label="Before the catch-up: who is it, and what does the KG remember?", style="dashed,filled",
+           fillcolor="#f3f6fa", color="#b8c4d6", fontname="Helvetica-Oblique", fontsize="11", labeljust="l")
+    c.node("known", "Opening: name everyone the agent\nhas talked with (KG) and ask\n\"What's your name?\"",
+           fillcolor=C_CATCH)
+    c.node("name", "Name from the answer:\na known name (any case), else\nthe LLM picks it out; none: ask again",
            fillcolor=C_SETUP)
-    c.node("open", "Opening turn:\ntime since last chat, summary of\npast topics, question on the\nmost under-covered topic",
+    decision(c, "d_known", "Known\nperson?")
+    c.node("memory", "Memory (KG queries for this person):\nlast conversation; catch-up topics +\n"
+           "targets (period capped at 14 days);\ntopics of the last chat (own words);\n"
+           "when each topic was last discussed\n-> timeline shown in the GUI", fillcolor=C_SETUP)
+    c.node("open", "Catch-up opening:\ntime since last chat, the topics\nof the LAST chat only, question\n"
+           "on the most under-covered topic", fillcolor=C_CATCH)
+    c.node("welcome", "Welcome (first meeting):\nno catch-up topics, no gap;\nask how they have been",
            fillcolor=C_CATCH)
     with c.subgraph() as r:
         r.attr(rank="same")
-        for n in ("last", "topics", "open"):
+        for n in ("known", "name", "d_known", "memory", "open"):
             r.node(n)
-    c.edge("last", "topics")
-    c.edge("topics", "open")
+    c.edge("known", "name")
+    c.edge("name", "d_known")
+    c.edge("d_known", "memory", label=" yes")
+    c.edge("memory", "open")
+    c.edge("d_known", "welcome", label=" no")
 
 g.node("human", "Human utterance", fillcolor=C_IO, group="spine", fontname="Helvetica-Bold", fontsize="13")
 g.edge("open", "human")
+g.edge("welcome", "human")
 
 # ---------------- Per-turn intent flow ----------------
 with g.subgraph(name="cluster_say") as c:
@@ -67,14 +81,20 @@ with g.subgraph(name="cluster_say") as c:
            fontcolor="#3d6b40", labeljust="l")
     decision(c, "d_conf", "Pending yes/no\nconfirmation\n(who-gap asked\nlast turn)?")
     decision(c, "d_int", "Pending intent\nanswer (what /\nhow much / where)?")
-    decision(c, "d_q", "Question about\nown record?\n(\"what did I drink?\")")
+    decision(c, "d_q", "Question about\nown record / life?\n(\"what did I drink?\")")
     c.node("srl", "SRL extraction -> push new activities to KG\non_new_subject -> tracker.reported[type] += 1",
            fillcolor=C_ACT, group="spine")
     decision(c, "d_gap", "New activity whose\nintent still has\nunmet requirements?")
 
     c.node("a_conf", tagged("Confirm / deny / correct\n-> push to KG, acknowledge", "gap"), fillcolor=C_ACT)
-    c.node("a_int", tagged("Classify & push the answer,\nacknowledge / next requirement", "gap"), fillcolor=C_ACT)
-    c.node("a_q", tagged("Answer from the KG\n(nothing extracted or pushed)", "kg_answer"), fillcolor=C_ACT)
+    c.node("a_int", tagged("Classify & push the answer,\nacknowledge", "gap"), fillcolor=C_ACT)
+    decision(c, "d_more", "That activity's\nintent still has\nunmet requirements?")
+    c.node("a_more", tagged("Ask its next requirement", "gap"), fillcolor=C_ACT)
+    c.node("a_sum", "Intent done: ONE sentence\nsumming up that activity,\nthen agent_fn (next topic)",
+           fillcolor=C_ACT)
+    c.node("a_q", tagged("Answer from the KG (nothing\nextracted or pushed); a long one\nshortened + \"Want the details?\"\n"
+                         "\"summarise my life\": short summary\nof the whole timeline",
+                         "kg_answer"), fillcolor=C_ACT)
     c.node("a_gap", tagged("Ask follow-up gap question\nabout THAT activity", "gap"), fillcolor=C_ACT)
 
 # ---------------- Catch-up / saturation layer ----------------
@@ -82,11 +102,12 @@ with g.subgraph(name="cluster_catch") as c:
     c.attr(label="wrap_agent_fn_with_saturation_loop(): catch-up / saturation layer", style="dashed,filled",
            fillcolor="#fdf6f0", color="#e2bc9c", fontname="Helvetica-Oblique", fontsize="11",
            fontcolor="#9a5a2a", labeljust="l")
-    decision(c, "d_recap", "Human asks\nfor a recap?\n(\"what have we\ndiscussed?\")")
-    decision(c, "d_sat", "Tracker saturated?\nevery topic:\nreported >= target\nor asked 3x")
+    decision(c, "d_recap", "Human's own last\nmessage asks for\na recap? (\"what have\nwe discussed?\")")
+    decision(c, "d_sat", "Tracker saturated?\ntargets met / asked 3x\nAND every topic\nhas come up")
     decision(c, "d_wrap", "Wrap-up\nalready sent?")
     c.node("a_recap", "Recap of what was covered\n(no tracker change)", fillcolor=C_CATCH)
-    c.node("a_next", tagged("next_question(): topic with the\nbiggest shortfall (follow-up\nphrasing if asked before)",
+    c.node("a_next", tagged("next_question(): catch-up target\nwith the biggest shortfall; then\n"
+                            "EXPLORE each topic not yet\ndiscussed: most recent for this\nperson first, else random",
                             "default"), fillcolor=C_CATCH)
     c.node("a_wrap", tagged("Wrap-up message (once):\nLLM continues briefly\nor says goodbye", "default"),
            fillcolor=C_CATCH)
@@ -117,6 +138,12 @@ g.edge("d_wrap", "a_llm", label=" yes", weight="20")
 # Branches.
 g.edge("d_conf", "a_conf", label="yes")
 g.edge("d_int", "a_int", label="yes")
+g.edge("a_int", "d_more")
+g.edge("a_conf", "d_more", style="dashed")
+g.edge("d_more", "a_more", label="yes")
+g.edge("d_more", "a_sum", label="no")
+g.edge("a_sum", "d_recap", label=" agent_fn", style="dashed", constraint="false", fontname="Helvetica",
+       fontsize="9", fontcolor="#666666")
 g.edge("d_q", "a_q", label="yes")
 g.edge("d_gap", "a_gap", label="yes")
 g.edge("d_recap", "a_recap", label="yes")
@@ -126,7 +153,7 @@ g.edge("a_next", "a_llm", label=" no topic left (None)", style="dashed", constra
        fontcolor="#666666")
 
 # Every reply -> agent reply -> next turn.
-for a in ("a_conf", "a_int", "a_q", "a_gap", "a_recap", "a_next", "a_wrap", "a_llm"):
+for a in ("a_more", "a_q", "a_gap", "a_recap", "a_next", "a_wrap", "a_llm"):
     g.edge(a, "reply")
 # "Next turn" loop, routed up the left via two invisible waypoints on the reply's and human's ranks.
 LOOP = dict(color="#7a6aa8", penwidth="1.6")
@@ -148,7 +175,7 @@ g.edge("lp_top", "human", headport="w", minlen="3", **LOOP)
 with g.subgraph(name="cluster_legend") as c:
     c.attr(label="", style="invis")
     c.attr("node", fontsize="10", margin="0.1,0.04", height="0.3")
-    items = [("l1", "setup query", C_SETUP, "box"), ("l2", "decision", C_DEC, "diamond"),
+    items = [("l1", "name / memory query", C_SETUP, "box"), ("l2", "decision", C_DEC, "diamond"),
              ("l3", "base intent-chat step", C_ACT, "box"), ("l4", "catch-up / saturation step", C_CATCH, "box"),
              ("l5", "turn", C_IO, "box"),
              ("l6", "[tag] = kg_session.reply_sources", "white", "plaintext")]

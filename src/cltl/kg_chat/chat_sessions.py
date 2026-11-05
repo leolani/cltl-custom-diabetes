@@ -18,9 +18,12 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 import openai
 from openai import OpenAI
+
+from cltl.kg_chat import llm_backend
 
 DEFAULT_MODEL = "gpt-5.1"
 
@@ -76,21 +79,24 @@ MAX_INTENT_GAP_ATTEMPTS = 2
 # --------------------------------------------------------------------------- #
 
 def _load_key() -> str:
-    env = os.environ.get("OPENAI_API_KEY")
-    if not env:
-        raise SystemExit("OPENAI_API_KEY environment variable not set.")
-    return env
+    """OPENAI_API_KEY, or a placeholder for a local server -- see llm_backend.api_key()."""
+    return llm_backend.api_key()
 
 
 _client = None
+_client_settings = None
 
 def _openai_client() -> OpenAI:
-    global _client
-    if _client is None:
+    global _client, _client_settings
+    # Made again after llm_backend.configure() changed the backend, e.g. when a notebook
+    # switches between OpenAI and the local server without restarting the kernel.
+    if _client is None or _client_settings != llm_backend.settings():
+        _client_settings = llm_backend.settings()
         # max_retries=0: a timeout should surface immediately as openai.APITimeoutError, not
         # after the SDK silently retries (its own default: up to 2 more times) -- see
         # _call_openai() below, which is what actually turns that into a message the human sees.
-        _client = OpenAI(api_key=_load_key(), timeout=DEFAULT_OPENAI_TIMEOUT, max_retries=0)
+        # OpenAI, or a local OpenAI-compatible server (llama-server) -- see llm_backend.
+        _client = llm_backend.client(DEFAULT_OPENAI_TIMEOUT)
     return _client
 
 
@@ -156,7 +162,8 @@ def openai_agent(model: str = DEFAULT_MODEL):
     """Build an agent_fn(messages) -> str backed by the OpenAI chat completions API.
     `messages` is the running list of {'role', 'content'} dicts (system/user/assistant)."""
     def _reply(messages):
-        response = _openai_client().chat.completions.create(model=model, messages=messages)
+        response = _openai_client().chat.completions.create(
+            model=llm_backend.model(model), messages=messages)
         return response.choices[0].message.content
     return _reply
 
@@ -489,9 +496,18 @@ class KgChatSession(ChatSession):
         # extracted and pushed as if it were a report (see say()). None (the default) disables it.
         self.question_answerer = question_answerer
         # DEFAULT_OPENAI_TIMEOUT -- see there, and ChatTimeoutError/_call_openai() -- for why.
-        self.extractor = extractor or deps["LLM_EventExtraction"](timeout=DEFAULT_OPENAI_TIMEOUT)
+        # Both go to OpenAI or to the local server, see llm_backend.
+        self.extractor = extractor or deps["LLM_EventExtraction"](
+            timeout=llm_backend.timeout(DEFAULT_OPENAI_TIMEOUT),
+            api_key=llm_backend.api_key(), base_url=llm_backend.base_url(),
+            model=llm_backend.model(DEFAULT_MODEL),
+            tool_calls=not llm_backend.is_local(),
+            history_turns=llm_backend.DEFAULT_LOCAL_HISTORY_TURNS if llm_backend.is_local() else None,
+        )
         self.replier = replier if replier is not None else deps["LLMTripleReplier"](
-            backend="openai", timeout=DEFAULT_OPENAI_TIMEOUT
+            backend="openai", timeout=llm_backend.timeout(DEFAULT_OPENAI_TIMEOUT),
+            openai_model=llm_backend.model(DEFAULT_MODEL),
+            api_key=llm_backend.api_key(), base_url=llm_backend.base_url(),
         )
         self.gap_threshold = gap_threshold
         # None means "no restriction" (every activity type is gap-eligible); otherwise a set of
@@ -991,7 +1007,7 @@ class KgChatSession(ChatSession):
         same way as the ones before it."""
         return [m["content"] for m in self._messages if m["role"] == "assistant"][-count:]
 
-    def _continue_after_ack(self, ack: str) -> str:
+    def _continue_after_ack(self, ack: str, subject: Optional[str] = None) -> str:
         """Append a natural, forward-driving follow-up after a bare acknowledgement (see
         _handle_confirmation_reply()'s confirm/deny_correct branches and
         _handle_intent_answer_reply()'s answer/decline branches) by calling self.agent_fn
@@ -1011,7 +1027,22 @@ class KgChatSession(ChatSession):
         A timeout getting the follow-up is swallowed (logged, not raised) -- the acknowledgement
         itself is already valid and worth keeping; losing the bonus continuation on a slow request
         isn't worth discarding it or surfacing a scary timeout message for what is, from the
-        human's point of view, an answer that already went through fine."""
+        human's point of view, an answer that already went through fine.
+
+        `subject` -- the activity whose question was just answered. While its intent still has
+        open requirements, the reply is the acknowledgement plus the next of those questions.
+        Once it has none (the intent is saturated), the acknowledgement becomes ONE sentence
+        summing up what was said about this activity only (_summarise_activity()), and the
+        follow-up below moves on to the next topic."""
+        if subject is not None:
+            try:
+                question = self._reply_from_gaps([subject])
+            except ChatTimeoutError:
+                question = None
+            if question:
+                return f"{ack} {question}"
+            ack = self._summarise_activity(subject, ack)
+
         # Without this, the follow-up often opens with yet another "thanks".
         messages = self._messages + [{"role": "system", "content":
             f"You have just said: \"{ack}\". Continue straight on from that, without "
@@ -1026,6 +1057,27 @@ class KgChatSession(ChatSession):
         if not followup or followup == ack:
             return ack
         return f"{ack} {followup}"
+
+    def _summarise_activity(self, subject: str, ack: str) -> str:
+        """One short sentence summing up what the human said about the activity `subject`, now
+        that its intent has nothing left to ask -- only this activity, not everything discussed
+        so far. `ack` when the summary cannot be made."""
+        label = self._subject_labels.get(subject) or subject.rsplit("/", 1)[-1]
+        recent = [m for m in self._messages[-8:] if m["role"] in ("user", "assistant")]
+        transcript = "\n".join(f"{'Them' if m['role'] == 'user' else 'You'}: {m['content']}" for m in recent)
+        prompt = [
+            {"role": "system", "content": (
+                f"You are a lifestyle coach chatting with {self.human}. In ONE short, warm sentence "
+                "(at most 20 words), sum up what they just told you about this one activity: "
+                f"\"{label}\". Mention nothing else they talked about. No question, no advice, "
+                "no thanks.")},
+            {"role": "user", "content": transcript},
+        ]
+        try:
+            summary = (_call_openai("summing up your answers", self.replier.reply, prompt) or "").strip()
+        except ChatTimeoutError:
+            return ack
+        return summary or ack
 
     def _handle_confirmation_reply(self, human_turn: dict) -> str:
         """Handle the human's answer to self._pending_confirmation (armed by _reply_from_gaps()):
@@ -1070,7 +1122,7 @@ class KgChatSession(ChatSession):
             )
             ack_prompt = self.replier._processor.get_prompt_for_gap_filled_ack(gap, self.human, self._recent_agent_replies())
             ack = _call_openai("acknowledging your answer", self.replier.reply, ack_prompt)
-            return self._continue_after_ack(ack)
+            return self._continue_after_ack(ack, gap["subject"])
 
         if verdict == "deny_correct":
             _, self._pending_triples_pushed = self._push_gap_triple(
@@ -1078,7 +1130,7 @@ class KgChatSession(ChatSession):
             )
             ack_prompt = self.replier._processor.get_prompt_for_gap_filled_ack(gap, correction, self._recent_agent_replies())
             ack = _call_openai("acknowledging your correction", self.replier.reply, ack_prompt)
-            return self._continue_after_ack(ack)
+            return self._continue_after_ack(ack, gap["subject"])
 
         # Plain denial, no usable correction -- ask the open question instead (no `human=`, so
         # get_prompt_for_kg_gap() does NOT take the confirmation branch this time).
@@ -1169,14 +1221,14 @@ class KgChatSession(ChatSession):
             )
             ack_prompt = self.replier._processor.get_prompt_for_gap_filled_ack(gap, value, self._recent_agent_replies())
             ack = _call_openai("acknowledging your answer", self.replier.reply, ack_prompt)
-            return True, self._continue_after_ack(ack)
+            return True, self._continue_after_ack(ack, gap["subject"])
 
         if verdict == "decline":
             ack_prompt = self.replier._processor.get_prompt_for_gap_declined_ack(gap, self._recent_agent_replies())
             ack = _call_openai(
                 "acknowledging that you don't have this", self.replier.reply, ack_prompt
             )
-            return True, self._continue_after_ack(ack)
+            return True, self._continue_after_ack(ack, gap["subject"])
 
         return False, None
 

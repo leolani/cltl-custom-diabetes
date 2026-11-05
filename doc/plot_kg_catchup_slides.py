@@ -4,7 +4,7 @@ The full process is in doc/kg_catchup_decision_flow.png (plot_kg_catchup_decisio
 big for one slide, so this draws it as an overview plus one chart per main step, left to right for 16:9:
 
     0_overview      the main steps and how a turn moves through them
-    1_setup         before the chat: last conversation, catch-up topics and targets, opening turn
+    1_setup         before the catch-up: ask the name, memory from the KG, opening or welcome
     2_intent_turn   KgIntentChatSession.say(): the per-turn intent flow
     3_catch_up      wrap_agent_fn_with_saturation_loop(): the catch-up / saturation layer
 
@@ -78,20 +78,26 @@ def overview():
     g = new_graph("0_overview", "KG catch-up chat: main steps")
     g.attr(ranksep="0.7", nodesep="0.6")
 
-    g.node("setup", html("read from the KG:\nlast conversation date\ncatch-up topics + targets\nopening turn",
-                         title="1  Before the chat"), fillcolor=C_SETUP)
+    g.node("setup", html("ask the name (known people from the KG)\nmemory: last conversation,\n"
+                         "catch-up topics + targets, last topics\nopening turn, or a welcome",
+                         title="1  Who is it?"), fillcolor=C_SETUP)
     g.node("human", "Human\nutterance", fillcolor=C_IO, fontname="Helvetica-Bold", fontsize="16")
     g.node("intent", html("answer a pending question\nanswer a question from the KG\n"
-                          "extract + push activities to KG,\nask intent follow-ups",
+                          "extract + push activities to KG,\nask intent follow-ups;\n"
+                          "intent done: one-sentence summary",
                           title="2  Per-turn intent flow"), fillcolor=C_ACT)
-    g.node("catch", html("recap on request\nask the next under-covered topic\n"
-                         "wrap up once saturated\nthen: ordinary chat",
+    g.node("catch", html("recap on request\nask the next under-covered topic,\n"
+                         "then every topic not yet discussed\nwrap up once saturated\nthen: ordinary chat",
                          title="3  Catch-up / saturation layer"), fillcolor=C_CATCH)
     g.node("reply", "Agent reply\n(pushed to KG)", fillcolor=C_IO, fontname="Helvetica-Bold", fontsize="16")
 
     g.edge("setup", "human", label=" opening turn")
     g.edge("human", "intent")
     g.edge("intent", "catch", label=" no follow-up\n left")
+    g.node("llm", html("OpenAI, or a local llama-server\n(llm_backend; LLM_BACKEND\nin the notebook)",
+                       title="LLM"), shape="note", style="filled", fillcolor=C_NOTE, fontsize="12",
+           color="#999999")
+    g.edge("reply", "llm", style="invis")
     g.edge("catch", "reply")
     g.edge("intent", "reply", label=" reply found", constraint="false")
     g.edge("reply", "human", label="next turn", color=C_LOOP, fontcolor=C_LOOP, penwidth="1.8",
@@ -104,38 +110,41 @@ def overview():
 # 1. Before the chat
 # --------------------------------------------------------------------------- #
 def setup():
-    g = new_graph("1_setup", "Step 1: before the chat (catch_up_from_kg.py)")
+    g = new_graph("1_setup", "Step 1: who is it, and what does the KG remember?")
     g.attr(ranksep="0.45")
 
-    g.node("brain", html("connect_brain():\nensure n2mu -> sem role\nmapping is in the KG", title="Connect"),
-           fillcolor=C_SETUP)
-    g.node("last", html("last conversation with HUMAN\n(fallback: 7 days ago)",
-                        title="Last conversation"), fillcolor=C_SETUP)
-    g.node("period", html("period = min(gap, 14 days)\nlonger gaps are capped",
-                          title="Catch-up period"), fillcolor=C_SETUP)
-    g.node("rate", html("per activity type with history:\nweekly rate over 7-day windows\n"
-                        "before the period",
-                        title="Typical weekly rate"), fillcolor=C_SETUP)
-    g.node("target", html("target = max(1, round(\n  rate x period days / 7))\n"
-                          "already reported = KG count\nin the period",
-                          title="Saturation target"), fillcolor=C_SETUP)
-    g.node("tracker", html("reported = already reported\nasked = 0 per topic",
-                           title="SaturationTracker"), fillcolor=C_CATCH)
-    g.node("open", html("1. time since last chat\n2. summary of all past topics\n"
+    g.node("known", html("everyone the agent has\ntalked with (KG) +\n\"What's your name?\"",
+                         title="Opening"), fillcolor=C_CATCH)
+    g.node("name", html("a known name (any case),\nelse the LLM picks it out;\nno name: ask again",
+                        title="Name"), fillcolor=C_SETUP)
+    decision(g, "d_known", "Known\nperson?")
+    g.node("memory", html("last conversation\ntopics of the last chat\n(their own words)\n"
+                          "when each topic was\nlast discussed\n-> timeline in the GUI",
+                          title="Memory"), fillcolor=C_SETUP)
+    g.node("target", html("period = min(gap, 14 days)\nweekly rate per type ->\n"
+                          "target = max(1, round(\n  rate x period days / 7))",
+                          title="Catch-up targets"), fillcolor=C_SETUP)
+    g.node("open", html("1. time since last chat\n2. topics of the LAST chat\n"
                         "3. question on the topic with\n    the biggest shortfall",
                         title="Opening turn"), fillcolor=C_CATCH)
+    g.node("welcome", html("no catch-up topics,\nno gap; ask how\nthey have been",
+                           title="Welcome (first meeting)"), fillcolor=C_CATCH)
     g.node("human", "Human\nutterance", fillcolor=C_IO, fontname="Helvetica-Bold", fontsize="16")
 
-    # Snake: queries left-to-right on top, then right-to-left underneath.
+    # Snake: name and memory left-to-right on top, then right-to-left underneath.
     g.attr(rankdir="TB")
-    same_rank(g, "brain", "last", "period", "rate")
-    same_rank(g, "human", "open", "tracker", "target")
-    for a, b in (("brain", "last"), ("last", "period"), ("period", "rate")):
+    same_rank(g, "known", "name", "d_known", "memory")
+    same_rank(g, "human", "welcome", "open", "target")
+    for a, b in (("known", "name"), ("name", "d_known")):
         g.edge(a, b)
-    g.edge("rate", "target")
+    g.edge("d_known", "memory", label=" yes")
+    g.edge("memory", "target")
     # Flat edges place their tail on the left, so draw these reversed with dir="back".
-    for a, b in (("target", "tracker"), ("tracker", "open"), ("open", "human")):
-        g.edge(b, a, dir="back")
+    g.edge("open", "target", dir="back")
+    g.edge("human", "open", dir="back")
+    g.edge("d_known", "welcome", label=" no")
+    g.edge("welcome", "human", style="invis")
+    g.edge("human", "welcome", dir="back")
     render(g, "1_setup")
 
 
@@ -168,13 +177,18 @@ def intent_turn():
     g.node("catch", html("no follow-up left:\ncall agent_fn", title="-> Step 3"), fillcolor=C_CATCH)
 
     g.node("a_conf", html("confirm / deny /\ncorrect -> push\n+ acknowledge", tag="gap"), fillcolor=C_ACT)
-    g.node("a_int", html("classify answer\n-> push, next\nrequirement", tag="gap"), fillcolor=C_ACT)
-    g.node("a_q", html("answer from\nthe KG\n(no push)", tag="kg_answer"), fillcolor=C_ACT)
+    g.node("a_int", html("classify answer\n-> push; next\nrequirement, or\nintent done:\n"
+                         "1-sentence summary\n-> step 3", tag="gap"), fillcolor=C_ACT)
+    g.node("a_q", html("answer from\nthe KG (no push);\nlong: gist +\n\"Want the\ndetails?\"\n"
+                       "life: short summary\nof the timeline",
+                       tag="kg_answer"), fillcolor=C_ACT)
     g.node("a_gap", html("follow-up\nquestion about\nTHAT activity", tag="gap"), fillcolor=C_ACT)
     g.node("reply", "Agent reply", fillcolor=C_IO, fontname="Helvetica-Bold", fontsize="16")
     g.node("note", html("A who-gap (agent role) is asked as a yes/no confirmation;\n"
                         "a what / how much / where gap arms a pending intent answer.\n"
-                        "Each intent requirement is asked a limited number of times.",
+                        "Each intent requirement is asked a limited number of times.\n"
+                        "When an activity's intent has nothing left to ask, its acknowledgement\n"
+                        "becomes one sentence about that activity only, and step 3 asks the next topic.",
                         title="Follow-up questions"),
            shape="note", style="filled", fillcolor=C_NOTE, fontsize="12", color="#999999")
 
@@ -195,19 +209,21 @@ def catch_up():
     g = new_graph("3_catch_up", "Step 3: catch-up / saturation layer (wrap_agent_fn_with_saturation_loop())")
 
     g.node("from", html("no intent follow-up\nleft this turn", title="From step 2"), fillcolor=C_ACT)
-    decision(g, "d_recap", "Recap\nrequested?")
+    decision(g, "d_recap", "Human's\nmessage asks\nfor a recap?")
     decision(g, "d_sat", "Tracker\nsaturated?")
     decision(g, "d_wrap", "Wrap-up\nalready\nsent?")
     g.node("a_llm", html("plain LLM reply\n(ordinary chat)", tag="default"), fillcolor=C_ACT)
 
     g.node("a_recap", html("recap of what\nwas covered\n(no tracker change)"), fillcolor=C_CATCH)
-    g.node("a_next", html("next_question():\ntopic with the biggest\nshortfall; follow-up\nphrasing if asked before",
+    g.node("a_next", html("next_question():\n1. catch-up target with\nthe biggest shortfall\n"
+                          "2. explore a topic not yet\ndiscussed: most recent\nfor them first, else random",
                           tag="default"), fillcolor=C_CATCH)
     g.node("a_wrap", html("wrap-up message (once):\nLLM continues briefly\nor says goodbye", tag="default"),
            fillcolor=C_CATCH)
     g.node("reply", "Agent reply", fillcolor=C_IO, fontname="Helvetica-Bold", fontsize="16")
-    g.node("note", html("A topic is saturated when reported >= target or it was asked 3 times;\n"
-                        "the tracker is saturated when every topic is.\n"
+    g.node("note", html("A catch-up target is done when reported >= target or it was asked 3 times.\n"
+                        "The tracker is saturated when every target is done AND every topic of the\n"
+                        "overall list has come up (reported, asked, or explored once).\n"
                         "reported is updated live by on_new_subject (step 2, Extract).",
                         title="Saturation"),
            shape="note", style="filled", fillcolor=C_NOTE, fontsize="12", color="#999999")

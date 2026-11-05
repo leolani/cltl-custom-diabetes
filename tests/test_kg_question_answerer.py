@@ -7,6 +7,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import cltl.kg_chat.kg_question_answerer as kg_question_answerer
+from datetime import datetime
+
 from cltl.kg_chat.kg_question_answerer import KgQuestionAnswerer, LOOKUP_FAILED_REPLY, QueryPlan, looks_like_question
 
 N2MU = "http://cltl.nl/leolani/n2mu/"
@@ -141,6 +143,48 @@ class KgQuestionAnswererTest(unittest.TestCase):
         answerer.try_answer("What did I eat?")
 
         self.assertIsNone(answerer._pending_detail)
+
+    def test_life_summary_is_made_from_the_timeline(self):
+        entries = [
+            {"type": "take_drink", "group": "activity", "label": "beer", "start": datetime(2026, 10, 30),
+             "end": datetime(2026, 10, 30)},
+            {"type": "take_drink", "group": "activity", "label": "tea", "start": datetime(2026, 10, 1),
+             "end": datetime(2026, 10, 1)},
+            {"type": "sleep", "group": "activity", "label": None, "start": datetime(2026, 9, 1),
+             "end": datetime(2026, 9, 1)},
+        ]
+        asked = []
+        llm = FakeLLM({"kg_question": True, "life_summary": True}, "You enjoy a beer and tea.")
+        answerer = self._answerer(llm)
+        answerer._fetch_timeline = lambda human: asked.append(human) or entries
+
+        self.assertTrue(looks_like_question("Summarise my life"))
+        self.assertEqual("You enjoy a beer and tea.", answerer.try_answer("Summarise my life"))
+        self.assertEqual(["Jan"], asked)
+        self.assertEqual([], self.queries)  # not the per-activity queries
+        overview = llm.calls[-1][0][0]["content"]
+        self.assertIn("- take drink (activity): 2 time(s), 01 Oct to 30 Oct; most recent: beer (30 Oct), tea (01 Oct)", overview)
+        self.assertIn("- sleep (activity): 1 time(s)", overview)
+        self.assertLess(overview.index("take drink"), overview.index("sleep"))  # most recent first
+
+    def test_life_summary_without_timeline_still_answers(self):
+        llm = FakeLLM({"kg_question": True, "life_summary": True}, "I don't know much yet.")
+        answerer = self._answerer(llm)
+        answerer._fetch_timeline = lambda human: []
+
+        self.assertEqual("I don't know much yet.", answerer.try_answer("How have I been overall?"))
+        self.assertIn("(nothing on record yet)", llm.calls[-1][0][0]["content"])
+
+    def test_plan_in_a_code_fence_and_life_summary_without_kg_question(self):
+        llm = FakeLLM(None, "unused")
+        llm.__call__ = None
+        fenced = '```json\n{"kg_question": false, "life_summary": true}\n```'
+        answerer = self._answerer(lambda messages, json_mode=False: fenced)
+
+        plan = answerer.plan("Summarise my life")
+
+        self.assertIsNotNone(plan)
+        self.assertTrue(plan.life_summary)
 
     def test_narrow_plan_without_matches_is_broadened(self):
         def rows(query):

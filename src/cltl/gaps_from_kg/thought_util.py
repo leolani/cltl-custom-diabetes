@@ -608,6 +608,24 @@ def get_last_chat_activity_types_query(target):
             } GROUP BY ?type ORDER BY ?first"
     return query
 
+def get_topic_recency_query(target):
+    """Per rdf:type, the last time `target` (an actor label) themselves mentioned an activity of
+    that type, in any chat (see get_last_chat_activity_types_query() for the same pattern, and why
+    only the human's own utterances count)."""
+    label = '"' + target + '"'
+    query = "PREFIX gaf: <http://groundedannotationframework.org/gaf#>\
+            PREFIX prov: <http://www.w3.org/ns/prov#>\
+            PREFIX sem: <http://semanticweb.cs.vu.nl/2009/11/sem/>\
+            PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>\
+            PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>\
+            select ?type (MAX(STR(?t)) as ?last) where { \
+                ?u sem:hasActor ?actor . \
+                ?actor rdfs:label " + label + " . \
+                ?m prov:wasDerivedFrom ?u ; sem:hasBeginTimeStamp ?t . \
+                ?a gaf:denotedIn ?m ; rdf:type ?type . \
+            } GROUP BY ?type"
+    return query
+
 def get_utterance_time_query(event_id):
         """The timestamp of the UTTERANCE `event_id` was denoted in (`gaf:denotedIn` ->
         `sem:hasBeginTimeStamp`, the same chain get_role_relation_query() already uses) -- the

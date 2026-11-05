@@ -102,3 +102,35 @@ Code from service.py from the old triple extraction:
             capsules.append(capsule)
             logger.debug("Capsule input after adding URI: %s", capsule)
         return capsules
+
+
+Why bigger should help here. The 7B model's weak spots in the test were following the long extraction instructions (about 6k tokens), assigning roles ("felt tired" became a qualifier of the meal), and working out dates. Models in the 30B–120B range are much better at following long instructions and at structured output. The short replies and catch-up questions were already fine at 7B.
+
+What I'd try on 128 GB (as of my knowledge; newer releases may exist):
+
+┌─────────────────────────────┬───────────────┬──────────────────────────────────────┬────────────────────────────────────────────────────────────────────────────────────┐
+│            Model            │    Memory     │           Speed on M5 Max            │                                       Notes                                        │
+│                             │    (Q4–Q8)    │                                      │                                                                                    │
+├─────────────────────────────┼───────────────┼──────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────┤
+│ Qwen3-30B-A3B-Instruct-2507 │ ~18–32 GB     │ very fast (only 3B active            │ Best first try: big jump over 7B, still quick                                      │
+│                             │               │ parameters)                          │                                                                                    │
+├─────────────────────────────┼───────────────┼──────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────┤
+│ gpt-oss-120b                │ ~63 GB        │ fast (about 5B active parameters)    │ Probably the strongest that fits; it reasons before it answers, so slower per      │
+│                             │               │                                      │ reply                                                                              │
+├─────────────────────────────┼───────────────┼──────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────┤
+│ Qwen3-Next-80B-A3B-Instruct │ ~45–85 GB     │ fast                                 │ Needs a recent llama.cpp (you have build 10090)                                    │
+├─────────────────────────────┼───────────────┼──────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────┤
+│ Llama 3.3 70B / Qwen2.5-72B │ ~40–75 GB     │ slow (all parameters active)         │ Strong, but replies will feel sluggish in a chat                                   │
+└─────────────────────────────┴───────────────┴──────────────────────────────────────┴────────────────────────────────────────────────────────────────────────────────────┘
+
+The models marked "only 3B active" or "about 5B active" are mixture-of-experts models: each token uses only a small part of the model. That suits a Mac, because speed depends on the active parameters while the whole model just has to fit in memory.
+
+Commands to try (I'm not certain of the exact repository names; check them on Hugging Face):
+llama-server -hf unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF:Q8_0 --port 8080 -c 16384
+llama-server -hf ggml-org/gpt-oss-120b-GGUF --port 8080 -c 16384 --jinja
+No code changes are needed: keep llm_backend: local and just restart the server with another model.
+
+Caveats:
+- Use the "Instruct" builds of Qwen3. The plain Qwen3 builds write out their reasoning first, which adds delay and can break the JSON output.
+- gpt-oss needs --jinja. I haven't checked that the JSON-schema mode the extractor uses works with its reasoning output. Test it before relying on it.
+- Judge on your own conversations. Generic benchmarks matter less here. The best check is the same few extraction and question tests on a handful of real Jan utterances for each model.

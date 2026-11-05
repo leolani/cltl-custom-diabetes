@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 import re
@@ -18,7 +19,9 @@ def _load_key() -> str:
     return env
 
 
-key = _load_key()
+# Loaded when the first extractor without its own api_key is made, not at import, so a local
+# server (see LLM_EventExtraction's base_url) works without OPENAI_API_KEY.
+key = None
 
 ACTIVITY_ID_PATTERN = re.compile(r"^chat(\d+)\.(\d+)$")
 
@@ -128,13 +131,45 @@ class SRLAnnotations(BaseModel):
         }
 
 
+def _anchored_activity_schema() -> dict:
+    """SRLAnnotations' JSON schema with every activity's value, offset, length and type required
+    and non-null -- for LLM_EventExtraction(tool_calls=False), whose output a local server
+    (llama-server) constrains to the schema with a grammar. With the plain schema, where those
+    four are optional (a bare reference to an earlier activity has only its activity_id), a
+    grammar-constrained model took the shortest way out and left them all null: every extraction
+    came back without an activity. The cost: a bare reference cannot be expressed this way, so
+    the model anchors it in the current utterance instead."""
+    schema = copy.deepcopy(SRLAnnotations.model_json_schema())
+    activity = schema["$defs"]["Activity"]
+    for key in ("value", "offset", "length", "type"):
+        prop = activity["properties"][key]
+        non_null = [branch for branch in prop.get("anyOf", []) if branch.get("type") != "null"]
+        if non_null:
+            rest = {k: v for k, v in prop.items() if k not in ("anyOf", "default")}
+            activity["properties"][key] = {**non_null[0], **rest}
+    activity["required"] = sorted(set(activity.get("required", [])) | {"value", "offset", "length", "type"})
+    return schema
+
+
 DEFAULT_TIMEOUT = 60.0  # seconds -- see the `timeout` parameter docstring below
+DEFAULT_MODEL = "gpt-5.1"
 
 
 class LLM_EventExtraction:
 
-    def __init__(self, timeout: float = DEFAULT_TIMEOUT):
+    def __init__(self, timeout: float = DEFAULT_TIMEOUT, api_key: Optional[str] = None,
+                 base_url: Optional[str] = None, model: str = DEFAULT_MODEL,
+                 tool_calls: bool = True, history_turns: Optional[int] = None):
         """
+        :param api_key, base_url: another OpenAI-compatible server, such as llama.cpp's
+            llama-server (base_url "http://localhost:8080/v1"), and its key. Default:
+            OPENAI_API_KEY and OpenAI itself.
+        :param model: the chat model.
+        :param tool_calls: False asks for the extractions as JSON following SRLAnnotations'
+            schema (response_format json_schema) instead of as a forced tool call, for a server
+            without tool calling (llama-server without --jinja).
+        :param history_turns: keep only this many earlier user turns (with the replies to them)
+            in the history sent along, for a model with a small context window. None keeps all.
         :param timeout: per-request timeout (seconds) for this instance's OpenAI client,
             passed straight through to openai.OpenAI(timeout=...). Without this, a stuck or
             very slow request has no ceiling and can block process_input() indefinitely (this
@@ -144,7 +179,13 @@ class LLM_EventExtraction:
             more times) before finally raising -- chat_sessions.KgChatSession's
             _call_openai() catches that and turns it into a message the human sees.
         """
-        self._client = OpenAI(api_key=key, timeout=timeout, max_retries=0)
+        global key
+        if api_key is None and key is None:
+            key = _load_key()
+        self._client = OpenAI(api_key=api_key or key, base_url=base_url, timeout=timeout, max_retries=0)
+        self._model = model
+        self._tool_calls = tool_calls
+        self._history_turns = history_turns
         self._history = []
         self._instruct = [{"role": "system", "content": prompts.prompt_conversational_srl_annotation}]
         self._known_activities = {}
@@ -154,15 +195,19 @@ class LLM_EventExtraction:
         function_schema = SRLAnnotations.to_openai_function()
 
         self._history.append({"role": "user", "content": "Input: {}".format(turn)})
+        self._trim_history()
 
         # 3. Prepare the messages
         messages = self._instruct+self._history
+
+        if not self._tool_calls:
+            return self._process_as_json(messages)
 
         # 4. Call the OpenAI API with the tool definition
         # You can set tool_choice to "required" if you insist the model calls the function,
         # or "auto" to let it decide.
         response = self._client.chat.completions.create(
-            model="gpt-5.1",
+            model=self._model,
             messages=messages,
             tools=[function_schema],
             tool_choice = "required"  # Force function call otherwise use :auto"
@@ -217,6 +262,31 @@ class LLM_EventExtraction:
                 return structured_output.extractions
             else:
                 return None
+
+    def _trim_history(self):
+        """Drop all but the last `history_turns` user turns (and what follows each of them)."""
+        if self._history_turns is None:
+            return
+        user_turns = [i for i, m in enumerate(self._history) if m["role"] == "user"]
+        if len(user_turns) > self._history_turns + 1:
+            self._history = self._history[user_turns[-(self._history_turns + 1)]:]
+
+    def _process_as_json(self, messages):
+        """process_input() for a server without tool calling: the extractions come back as the
+        message content, constrained to SRLAnnotations' JSON schema."""
+        response = self._client.chat.completions.create(
+            model=self._model,
+            messages=messages,
+            response_format={"type": "json_schema", "json_schema": {
+                "name": "extract_events", "schema": _anchored_activity_schema(), "strict": True}},
+        )
+        content = response.choices[0].message.content or ""
+        self._history.append({"role": "assistant", "content": content})
+        try:
+            return SRLAnnotations(**json.loads(content)).extractions
+        except Exception as e:
+            print("Error parsing JSON output:", e)
+            return None
 
     def check_compliance(self, chat_number, utterance, extractions):
         """Validate a turn's extractions against the annotations.json Output-entry schema.

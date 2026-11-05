@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, Dict, List, Optional
 
+from cltl.kg_chat import llm_backend
 from cltl.kg_chat.chat_sessions import DEFAULT_MODEL, _call_openai, _openai_client
 
 logger = logging.getLogger(__name__)
@@ -87,7 +88,13 @@ _QUESTION_WORDS = (
     "what", "when", "where", "which", "who", "whom", "whose", "why", "how", "did", "do", "does",
     "have", "has", "had", "was", "were", "is", "are", "am", "can", "could", "would", "will",
 )
-_QUESTION_PHRASES = ("tell me", "remind me", "show me", "do you know", "do you remember", "list ")
+_QUESTION_PHRASES = ("tell me", "remind me", "show me", "do you know", "do you remember", "list ",
+                     "summar", "overview")
+
+# A life summary (see KgQuestionAnswerer.summarise_life()) is at most this many words, and is
+# made from at most this many of the most recent timeline entries per activity type.
+LIFE_SUMMARY_WORDS = 40
+LIFE_SUMMARY_LABELS_PER_TYPE = 3
 
 # rdflib's SPARQLStore prepends its own PREFIX declarations (rdf, rdfs, prov, dc, foaf, ...) to
 # every query, and GraphDB rejects a query that declares a prefix twice ("Multiple prefix
@@ -148,6 +155,9 @@ class QueryPlan:
     activity_types: List[str] = field(default_factory=list)
     keywords: List[str] = field(default_factory=list)
     since: Optional[str] = None
+    # True: they asked for a summary of their life / how they have been overall, answered from
+    # their whole timeline (summarise_life()) instead of from matching activities.
+    life_summary: bool = False
 
 
 @dataclass
@@ -184,6 +194,42 @@ def looks_like_question(utterance: str) -> bool:
     return first_word in _QUESTION_WORDS or any(phrase in text for phrase in _QUESTION_PHRASES)
 
 
+def _json_object(raw: Optional[str]) -> Optional[Dict]:
+    """The JSON object in an LLM reply, also when it is wrapped in a markdown code fence
+    (```json ... ```), which a local model does even in JSON mode; None if there is none."""
+    text = (raw or "").strip()
+    fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.DOTALL)
+    if fenced:
+        text = fenced.group(1)
+    elif not text.startswith("{"):
+        start, end = text.find("{"), text.rfind("}")
+        text = text[start:end + 1] if 0 <= start < end else ""
+    try:
+        data = json.loads(text or "{}")
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _timeline_overview(entries: List[Dict]) -> str:
+    """One line per activity type, most recent first: how many entries, from when to when, and
+    the latest few labels -- a compact view of the whole timeline for the life summary prompt."""
+    by_type: Dict[str, List[Dict]] = {}
+    for entry in entries:
+        by_type.setdefault(entry["type"], []).append(entry)
+    lines = []
+    for activity_type, items in sorted(by_type.items(), key=lambda kv: max(e["end"] for e in kv[1]),
+                                       reverse=True):
+        items.sort(key=lambda e: e["end"], reverse=True)
+        labels = [f'{e["label"]} ({e["end"]:%d %b})' for e in items if e.get("label")]
+        labels = list(dict.fromkeys(labels))[:LIFE_SUMMARY_LABELS_PER_TYPE]
+        first = min(e["start"] for e in items)
+        lines.append(f"- {activity_type.replace('_', ' ')} ({items[0]['group']}): {len(items)} time(s), "
+                     f"{first:%d %b} to {items[0]['end']:%d %b}"
+                     + (f"; most recent: {', '.join(labels)}" if labels else ""))
+    return "\n".join(lines)
+
+
 def _sparql_string(value: str) -> str:
     """`value` safe to put between double quotes in a SPARQL query."""
     return re.sub(r'["\\\n\r]', " ", value).strip().lower()
@@ -204,13 +250,16 @@ class KgQuestionAnswerer:
                  max_answer_words: int = DEFAULT_MAX_ANSWER_WORDS,
                  max_facts: int = DEFAULT_MAX_FACTS,
                  run_query: Optional[Callable[[str], List[Dict]]] = None,
-                 complete: Optional[Callable[..., str]] = None):
+                 complete: Optional[Callable[..., str]] = None,
+                 fetch_timeline: Optional[Callable[[str], List[Dict]]] = None):
         """
         run_query -- callable(sparql) -> rows (dicts of strings, None for unbound), defaults to
                      kg_gap_finder.run_query() against `kg_address`.
         complete  -- callable(messages, json_mode=False) -> str, defaults to an OpenAI chat
                      completion with `model`.
-        Both are injectable so the answerer can be tested without GraphDB or OpenAI.
+        fetch_timeline -- callable(human) -> cltl.plots.patient_timeline entries, for a life
+                     summary; defaults to the timeline query against `kg_address`.
+        All are injectable so the answerer can be tested without GraphDB or OpenAI.
         """
         self.kg_address = kg_address
         self.human = human
@@ -219,6 +268,7 @@ class KgQuestionAnswerer:
         self.max_facts = max_facts
         self._run_query = run_query or self._endpoint_query
         self._complete = complete or self._openai_complete
+        self._fetch_timeline = fetch_timeline or self._timeline_entries
         self._graph = None
         # The full answer behind a shortened one (see answer()), until the human's next message.
         self._pending_detail: Optional[str] = None
@@ -245,6 +295,15 @@ class KgQuestionAnswerer:
         plan = self.plan(utterance, messages)
         if plan is None:
             return None
+
+        if plan.life_summary:
+            try:
+                entries = self._fetch_timeline(self.human)
+            except Exception:
+                logger.exception("Failed to fetch the timeline of %s from %s", self.human, self.kg_address)
+                return LOOKUP_FAILED_REPLY
+            logger.info("Summarising the life of %s from %s timeline entries", self.human, len(entries))
+            return self.summarise_life(plan, entries, messages)
 
         try:
             facts = self.retrieve(plan)
@@ -274,7 +333,9 @@ class KgQuestionAnswerer:
             f"Decide whether {self.human}'s LAST message asks to be told something about their "
             "own past activities or conditions as recorded there, e.g. \"what did I eat "
             "yesterday?\", \"when did I last exercise?\", \"how have I slept this week?\", "
-            "\"what did I tell you about my medication?\".\n"
+            "\"what did I tell you about my medication?\", or asks for a summary of their life "
+            "or of how they have been overall (\"summarise my life\", \"how have I been doing "
+            "overall?\").\n"
             "It is NOT such a question when it asks for a recap of the current conversation, asks "
             "for general information or advice (\"is pasta bad for me?\"), asks about the coach, "
             "or is a rhetorical question within a report.\n\n"
@@ -285,7 +346,9 @@ class KgQuestionAnswerer:
             '- "keywords": up to 5 short lower-case words for the specific things asked about '
             '(e.g. "pasta", "walk", "insulin"), or [] for none\n'
             '- "since": the earliest date the answer could have been mentioned on, as '
-            f'YYYY-MM-DD, or null for no limit. Today is {today:%A %Y-%m-%d}.'
+            f'YYYY-MM-DD, or null for no limit. Today is {today:%A %Y-%m-%d}.\n'
+            '- "life_summary": true when they ask for a summary or overview of their life or of '
+            'how they have been overall, rather than about something specific'
         )
         prompt = ([{"role": "system", "content": system}]
                   + _recent_context(messages[:-1] if messages else None)
@@ -293,12 +356,14 @@ class KgQuestionAnswerer:
         raw = _call_openai("checking whether you asked about your own records",
                            self._complete, prompt, json_mode=True)
 
-        try:
-            data = json.loads(raw or "{}")
-        except json.JSONDecodeError:
+        data = _json_object(raw)
+        if data is None:
             logger.warning("Planner returned no JSON: %r", raw)
             return None
-        if not isinstance(data, dict) or data.get("kg_question") is not True:
+        # A life summary is a question about their record, even when the model says otherwise
+        # ("kg_question": false next to "life_summary": true, as a local model does).
+        life_summary = data.get("life_summary") is True
+        if data.get("kg_question") is not True and not life_summary:
             return None
 
         activity_types = [t for t in (data.get("activity_types") or [])
@@ -308,7 +373,8 @@ class KgQuestionAnswerer:
         if not (isinstance(since, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", since)):
             since = None
 
-        return QueryPlan(utterance, activity_types, [k for k in keywords if k][:5], since)
+        return QueryPlan(utterance, activity_types, [k for k in keywords if k][:5], since,
+                         life_summary=life_summary)
 
     # ------------------------------------------------------------------ #
     # 2. Retrieve
@@ -453,6 +519,47 @@ class KgQuestionAnswerer:
 
         return reply
 
+    def summarise_life(self, plan: QueryPlan, entries: List[Dict],
+                       messages: Optional[List[Dict]] = None) -> str:
+        """A short summary (at most LIFE_SUMMARY_WORDS) of the human's timeline -- the same
+        entries the GUI's timeline shows -- condensed per activity type to how often it came up,
+        over which period, and its most recent labels."""
+        today = datetime.now()
+        overview = _timeline_overview(entries) or "(nothing on record yet)"
+        system = (
+            f"You are a lifestyle coach chatting with {self.human}, a person with Type 2 "
+            f"diabetes. They asked you to sum up their life as they told you about it. Use ONLY "
+            "the overview below of what they told you in earlier conversations, per area, with "
+            "how often it came up, when, and the most recent things they mentioned.\n"
+            f"Reply in at most two short sentences and {LIFE_SUMMARY_WORDS} words: the main "
+            "picture and what stands out recently, in warm, plain language, speaking to them as "
+            "\"you\". No lists, no counts, no category names like \"take_food\", no advice. If "
+            "there is nothing on record, say so and ask them to tell you about their days.\n\n"
+            f"Today is {today:%A %Y-%m-%d}.\n\nOverview:\n{overview}"
+        )
+        prompt = ([{"role": "system", "content": system}]
+                  + _recent_context(messages[:-1] if messages else None)
+                  + [{"role": "user", "content": plan.question}])
+        reply = (_call_openai("summing up what you told me", self._complete, prompt) or "").strip()
+        if len(reply.split()) > LIFE_SUMMARY_WORDS * 1.25:
+            reply = self._shorten(plan.question, reply, LIFE_SUMMARY_WORDS)
+        return reply
+
+    def _timeline_entries(self, human: str) -> List[Dict]:
+        """cltl.plots.patient_timeline's entries for `human`, over plain HTTP: the timeline query
+        declares its own prefixes, which rdflib's SPARQLStore (self._run_query) would repeat."""
+        import urllib.parse
+        import urllib.request
+        from cltl.plots.patient_timeline import entry_from_row, timeline_query
+
+        data = urllib.parse.urlencode({"query": timeline_query(human)}).encode()
+        request = urllib.request.Request(self.kg_address, data=data, headers={
+            "Accept": "application/sparql-results+json",
+            "Content-Type": "application/x-www-form-urlencoded"})
+        with urllib.request.urlopen(request, timeout=60) as response:
+            rows = json.load(response)["results"]["bindings"]
+        return sorted((e for e in (entry_from_row(row) for row in rows) if e), key=lambda e: e["start"])
+
     def wants_detail(self, utterance: str) -> bool:
         """Whether `utterance` says yes to the offer of more detail that ended the last answer."""
         if _NO_DETAIL.match(utterance):
@@ -467,6 +574,18 @@ class KgQuestionAnswerer:
         ]
         raw = _call_openai("checking whether you want more detail", self._complete, prompt) or ""
         return raw.strip().upper().startswith("YES")
+
+    def _shorten(self, question: str, answer: str, max_words: int) -> str:
+        """`answer` cut down to at most `max_words`, keeping its tone, without offering detail."""
+        prompt = [
+            {"role": "system", "content": (
+                f"Shorten the coach's answer to {self.human}'s question to at most {max_words} "
+                "words and two sentences. Keep the warm tone and speak to them as \"you\"; add "
+                "nothing. Reply with the shortened answer only.")},
+            {"role": "user", "content": f"Question: {question}\n\nAnswer: {answer}"},
+        ]
+        short = (_call_openai("shortening the answer", self._complete, prompt) or "").strip()
+        return short or answer
 
     def summarise(self, question: str, answer: str) -> str:
         prompt = [
@@ -500,6 +619,7 @@ class KgQuestionAnswerer:
 
     def _openai_complete(self, messages: List[Dict], json_mode: bool = False) -> str:
         kwargs = {"response_format": {"type": "json_object"}} if json_mode else {}
-        response = _openai_client().chat.completions.create(model=self.model, messages=messages, **kwargs)
+        response = _openai_client().chat.completions.create(model=llm_backend.model(self.model),
+                                                            messages=messages, **kwargs)
 
         return response.choices[0].message.content

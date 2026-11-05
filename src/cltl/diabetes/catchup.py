@@ -28,10 +28,11 @@ import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Callable, List, Optional
 
 from cltl.diabetes import place
 from cltl.diabetes.api import Conversation, ConversationFactory, Reply
+from cltl.kg_chat import llm_backend
 from cltl.kg_chat.graphdb_links import graphdb_visualization_url
 
 logger = logging.getLogger(__name__)
@@ -66,11 +67,15 @@ class CatchUpConversation(Conversation):
         fallback_date = self.current_date - timedelta(days=fallback_gap_days)
         self.last_conversation_date = catch_up.find_last_conversation_date(
             human, ltm, self.current_date, fallback_date)
-        self.catch_up_topics = catch_up.find_catch_up_topics(
+        # Someone the agent has never talked with gets a welcome instead of a
+        # catch-up: find_catch_up_topics() counts everyone's activities, not
+        # just this person's.
+        self.first_meeting = human not in catch_up.find_known_humans(ltm)
+        self.catch_up_topics = [] if self.first_meeting else catch_up.find_catch_up_topics(
             ltm, self.current_date, self.last_conversation_date)
         # Only these are recapped in the opening; the catch-up topics above
         # are every topic with history, to fill up to two weeks.
-        self.last_topics = catch_up.find_last_conversation_topics(human, ltm)
+        self.last_topics = [] if self.first_meeting else catch_up.find_last_conversation_topics(human, ltm)
         logger.info("Catch-up for %s in scenario %s: last conversation %s, topics %s",
                     human, scenario_id, self.last_conversation_date,
                     [(t["activity_type"], t["expected_count"]) for t in self.catch_up_topics])
@@ -82,7 +87,11 @@ class CatchUpConversation(Conversation):
         self._places = place.PlaceResolver(
             ltm, human, lambda messages: chat_sessions._call_openai("working out where you are", llm, messages),
             same_threshold=place_same_threshold, ask_threshold=place_ask_threshold)
-        self.tracker = catch_up.SaturationTracker(self.catch_up_topics, human=human, model=model)
+        # After the catch-up, every topic that has not come up yet is asked about, the ones this
+        # person talked about most recently first.
+        self.tracker = catch_up.SaturationTracker(
+            self.catch_up_topics, human=human, model=model,
+            topic_recency={} if self.first_meeting else catch_up.find_topic_recency(human, ltm))
         agent_fn = catch_up.wrap_agent_fn_with_saturation_loop(
             chat_sessions.openai_agent(model), self.tracker)
         # None leaves the human's questions to the normal flow.
@@ -129,7 +138,8 @@ class CatchUpConversation(Conversation):
         try:
             opening = self.tracker.opening_question(self.current_date, self.last_conversation_date,
                                                     place_question=place_question, place_remark=place_remark,
-                                                    last_topics=self.last_topics)
+                                                    last_topics=self.last_topics,
+                                                    first_meeting=self.first_meeting)
         except self._chat_sessions.ChatTimeoutError as e:
             logger.warning("Timed out %s, opening with a plain greeting instead", e.source)
             opening = f"Hi {self.human}, good to talk to you again! {fallback}"
@@ -252,18 +262,88 @@ class CatchUpConversation(Conversation):
         return self._log_dir / "chat_logs" / f"{name}_turns_{stamp}.json"
 
 
+class AskNameConversation(Conversation):
+    """Finds out who the agent is talking to before catching up with them: the opening names
+    everyone in the knowledge graph the agent has talked with (catch_up_from_kg.
+    find_known_humans()) and asks for the human's name; the answer starts a CatchUpConversation
+    with that name (`start(name)`), whose opening is the reply. After that, everything goes to
+    that conversation.
+
+    The name in the answer is one of the known names when it mentions one (in any case), so a
+    returning human is caught up under the name the knowledge graph has for them; otherwise an
+    LLM call picks the name out of the answer, and a new human is started with it. When there is
+    still no name after asking twice, `fallback_human` is used."""
+
+    MAX_ASKS = 2
+
+    def __init__(self, scenario_id: str, ltm, start: Callable[[str], Conversation],
+                 fallback_human: str, model: Optional[str] = None):
+        chat_sessions, catch_up, _ = _load_kg_chat()
+        self._chat_sessions = chat_sessions
+        self._catch_up = catch_up
+        self.scenario_id = scenario_id
+        self._ltm = ltm
+        self._start = start
+        self._fallback_human = fallback_human
+        self._model = model or chat_sessions.DEFAULT_MODEL
+        self._known: List[str] = []
+        self._asked = 0
+        self._conversation: Optional[Conversation] = None
+
+    @property
+    def human(self) -> Optional[str]:
+        return getattr(self._conversation, "human", None)
+
+    def open(self) -> Optional[str]:
+        try:
+            self._known = self._catch_up.find_known_humans(self._ltm)
+        except Exception:
+            logger.exception("Failed to look up the people known in the knowledge graph")
+        logger.info("Known people in scenario %s: %s", self.scenario_id, self._known)
+        self._asked = 1
+        return self._catch_up.known_humans_opening(self._known)
+
+    def respond(self, utterance: str) -> Reply:
+        if self._conversation is not None:
+            return self._conversation.respond(utterance)
+
+        name = self._name_in(utterance)
+        if not name and self._asked < self.MAX_ASKS:
+            self._asked += 1
+            return Reply(self._catch_up.NAME_RETRY_QUESTION)
+        name = name or self._fallback_human
+        logger.info("Talking to %s in scenario %s (%s)", name, self.scenario_id,
+                    "known" if name in self._known else "new")
+
+        self._conversation = self._start(name)
+
+        # A new person gets a welcome (CatchUpConversation.first_meeting).
+        return Reply(self._conversation.open())
+
+    def close(self) -> None:
+        if self._conversation is not None:
+            self._conversation.close()
+
+    def _name_in(self, utterance: str) -> Optional[str]:
+        return self._catch_up.name_in_utterance(
+            utterance, self._known, agent_fn=self._chat_sessions.openai_agent(self._model))
+
+
 class CatchUpConversationFactory(ConversationFactory):
     def __init__(self, kg_address: str, intents_dir: str, log_dir: str,
                  fallback_gap_days: int = 7, model: Optional[str] = None,
                  max_answer_words: Optional[int] = None,
                  place_same_threshold: float = place.DEFAULT_SAME_THRESHOLD,
-                 place_ask_threshold: float = place.DEFAULT_ASK_THRESHOLD):
+                 place_ask_threshold: float = place.DEFAULT_ASK_THRESHOLD,
+                 ask_name: bool = False):
         # The kg-chat code reads the key at import time and calls sys.exit()
         # when it is missing, which would take down the service thread in the
         # middle of a conversation instead of at start-up.
-        if not os.environ.get("OPENAI_API_KEY"):
+        # A local server (llm_backend: local) needs no key.
+        if not llm_backend.is_local() and not os.environ.get("OPENAI_API_KEY"):
             raise ValueError("OPENAI_API_KEY is not set; cltl-custom-diabetes needs it "
-                             "for event extraction and reply generation")
+                             "for event extraction and reply generation (or set "
+                             "llm_backend: local to use a local server instead)")
         self._kg_address = kg_address
         self._intents_dir = intents_dir
         self._log_dir = Path(log_dir)
@@ -272,16 +352,26 @@ class CatchUpConversationFactory(ConversationFactory):
         self._max_answer_words = max_answer_words
         self._place_same_threshold = place_same_threshold
         self._place_ask_threshold = place_ask_threshold
+        # True asks the human's name first (AskNameConversation) instead of using `human`.
+        self._ask_name = ask_name
 
         self._lock = threading.Lock()
         self._intents = None
 
     def create(self, scenario_id: str, human: str, ltm) -> Conversation:
-        return CatchUpConversation(scenario_id, human, ltm, self._kg_address, self._load_intents(),
-                                   self._log_dir, self._fallback_gap_days, self._model,
-                                   max_answer_words=self._max_answer_words,
-                                   place_same_threshold=self._place_same_threshold,
-                                   place_ask_threshold=self._place_ask_threshold)
+        """A catch-up conversation with `human`, or, with ask_name, one that first asks who it
+        is talking to and then catches up with that person (`human` is then only the fallback)."""
+        def start(name: str) -> Conversation:
+            return CatchUpConversation(scenario_id, name, ltm, self._kg_address, self._load_intents(),
+                                       self._log_dir, self._fallback_gap_days, self._model,
+                                       max_answer_words=self._max_answer_words,
+                                       place_same_threshold=self._place_same_threshold,
+                                       place_ask_threshold=self._place_ask_threshold)
+
+        if self._ask_name:
+            return AskNameConversation(scenario_id, ltm, start, fallback_human=human, model=self._model)
+
+        return start(human)
 
     def _load_intents(self):
         with self._lock:

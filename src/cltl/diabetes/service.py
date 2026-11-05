@@ -1,8 +1,10 @@
 import ast
 import json
 import logging
+import re
+from collections import deque
 from datetime import date, datetime
-from typing import Dict, Optional, Set
+from typing import Deque, Dict, Optional, Set
 
 from cltl.combot.event.emissor import TextSignalEvent
 from cltl.combot.infra.config import ConfigurationManager
@@ -31,6 +33,14 @@ SCENARIO_STARTED = "ScenarioStarted"
 SCENARIO_STOPPED = "ScenarioStopped"
 
 ERROR_REPLY = "Sorry, something went wrong on my side. Could you say that again?"
+
+# Echo filter (see DiabetesService._is_echo()): with speech, the microphone picks up the agent's own
+# spoken reply, and answering that makes the agent talk to itself. An utterance of at least
+# ECHO_MIN_WORDS words of which at least ECHO_OVERLAP are words of one of the last
+# ECHO_REPLIES replies is taken for such an echo and ignored.
+ECHO_REPLIES = 3
+ECHO_MIN_WORDS = 3
+ECHO_OVERLAP = 0.7
 
 
 class DiabetesService:
@@ -109,6 +119,8 @@ class DiabetesService:
         self._conversations: Dict[str, Conversation] = {}
         self._speakers: Dict[str, str] = {}
         self._contexts_added: Set[str] = set()
+        # The agent's last ECHO_REPLIES replies per scenario, see _is_echo().
+        self._recent_replies: Dict[str, Deque[str]] = {}
         self._topic_worker = None
 
     @property
@@ -176,6 +188,9 @@ class DiabetesService:
         text = event.payload.signal.text
         if not text or not text.strip():
             return
+        if self._is_echo(scenario_id, text):
+            logger.info("Ignored %r in scenario %s: an echo of the agent's own reply", text, scenario_id)
+            return
 
         try:
             self._event_bus.publish(self._status_topic, Event.for_scenario_payload(
@@ -186,10 +201,10 @@ class DiabetesService:
         except Exception:
             logger.exception("Failed to respond to %r in scenario %s", text, scenario_id)
             response, graph_uri = ERROR_REPLY, None
-
-        self._publish(response, scenario_id, event)
+        if response:
+            self._publish(response, scenario_id, event)
         if graph_uri and self._graph_topic:
-            displayEvent = DisplayEvent("http://localhost:8000/monitoring/…","Monitoring")
+            displayEvent = DisplayEvent(graph_uri,"Monitoring")
             self._event_bus.publish(self._graph_topic, Event.for_scenario_payload(scenario_id,displayEvent))
            # self._publish(graph_uri, scenario_id, event, topic=self._graph_topic)
             self._event_bus.publish(self._status_topic, Event.for_scenario_payload(
@@ -216,6 +231,7 @@ class DiabetesService:
         self._publish(opening, scenario_id, event)
 
     def _close(self, scenario_id: str):
+        self._recent_replies.pop(scenario_id, None)
         conversation = self._conversations.pop(scenario_id, None)
         if not conversation:
             return
@@ -236,10 +252,29 @@ class DiabetesService:
 
         return name.strip() if name and name.strip() else None
 
+    @staticmethod
+    def _words(text: str):
+        return re.findall(r"[a-z0-9']+", text.lower().replace("’", "'"))
+
+    def _is_echo(self, scenario_id: str, text: str) -> bool:
+        """Whether `text` mostly repeats one of the agent's last replies in this scenario: the
+        microphone picking up the agent's own voice (a fragment of it, often). Short utterances
+        ("No.", "Good") are never taken for an echo."""
+        words = self._words(text)
+        if len(words) < ECHO_MIN_WORDS:
+            return False
+        for reply in self._recent_replies.get(scenario_id, ()):
+            reply_words = set(self._words(reply))
+            if sum(word in reply_words for word in words) / len(words) >= ECHO_OVERLAP:
+                return True
+        return False
+
     def _publish(self, response: Optional[str], scenario_id: str, source: Event,
                  topic: Optional[str] = None):
         if not response:
             return
+        if not topic or topic == self._output_topic:
+            self._recent_replies.setdefault(scenario_id, deque(maxlen=ECHO_REPLIES)).append(response)
 
         signal = TextSignal.for_scenario(scenario_id, timestamp_now(), timestamp_now(), None, response)
         payload = TextSignalEvent.for_agent(signal)

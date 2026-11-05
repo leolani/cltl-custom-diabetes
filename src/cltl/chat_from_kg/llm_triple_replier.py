@@ -16,7 +16,7 @@ DEFAULT_TIMEOUT = 60.0  # seconds, backend="openai" only -- see the `timeout` pa
 
 class LLMTripleReplier():
     def __init__(self, language="English", model_name="llama3.2", backend="ollama", openai_model="gpt-5.1",
-                 timeout: float = DEFAULT_TIMEOUT):
+                 timeout: float = DEFAULT_TIMEOUT, api_key: str = None, base_url: str = None):
         """
         Generate natural language based on structured data
 
@@ -28,6 +28,9 @@ class LLMTripleReplier():
             imported in that case) or "openai" (needs OPENAI_API_KEY, same as the rest of
             events_from_chat).
         openai_model: OpenAI chat model, used only when backend="openai".
+        api_key, base_url: backend="openai" only -- another OpenAI-compatible server, such as
+            llama.cpp's llama-server (base_url "http://localhost:8080/v1"), and its key.
+            Default: OPENAI_API_KEY and OpenAI itself.
         timeout: per-request timeout (seconds), backend="openai" only -- passed straight
             through to openai.OpenAI(timeout=...). Without this, a stuck or very slow request
             has no ceiling and can block reply() indefinitely (this is what happened before it
@@ -49,7 +52,8 @@ class LLMTripleReplier():
             self._ollama_client = ChatOllama(model=model_name, temperature=0.1, num_ctx=4096)  # limits KV-cache size, avoids GPU OOM
         elif backend == "openai":
             from openai import OpenAI
-            self._openai_client = OpenAI(api_key=_load_openai_key(), timeout=timeout, max_retries=0)
+            self._openai_client = OpenAI(api_key=api_key or _load_openai_key(), base_url=base_url,
+                                         timeout=timeout, max_retries=0)
             self._openai_model = openai_model
         else:
             raise ValueError(f"Unknown backend {backend!r}, expected 'ollama' or 'openai'")
