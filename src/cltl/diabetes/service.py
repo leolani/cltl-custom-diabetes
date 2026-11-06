@@ -1,11 +1,18 @@
 import ast
+import base64
+import html
+import io
 import json
 import logging
 import re
+import tempfile
+import webbrowser
 from collections import deque
 from datetime import date, datetime
+from pathlib import Path
 from typing import Deque, Dict, Optional, Set
 
+from _pytest._code import source
 from cltl.combot.event.emissor import TextSignalEvent
 from cltl.combot.infra.config import ConfigurationManager
 from cltl.combot.infra.event import Event, EventBus
@@ -41,6 +48,85 @@ ERROR_REPLY = "Sorry, something went wrong on my side. Could you say that again?
 ECHO_REPLIES = 3
 ECHO_MIN_WORDS = 3
 ECHO_OVERLAP = 0.7
+
+# An utterance asking to see the timeline ("show me my timeline", "can I see the timeline?") is
+# not answered by the conversation: the patient's timeline (cltl.plots.patient_timeline) is
+# rendered from the knowledge graph and opened in a new browser tab.
+TIMELINE_REQUEST = re.compile(r"\b(show|display|open|see|view|plot|draw)\b.*\btime\s?line\b"
+                              r"|\btime\s?line\b.*\b(please|show|display|open|see|view)\b",
+                              re.IGNORECASE)
+TIMELINE_DAYS = 60
+TIMELINE_REPLY = "Here is your timeline, {human}. I opened it in a new browser tab."
+TIMELINE_ERROR_REPLY = "Sorry, I could not make your timeline right now."
+TIMELINE_DPI = 110
+
+# The timeline page: the plot with a transparent box over every mark (positioned in % of the
+# image, so they keep fitting when it is scaled), a tooltip on hover and the details on click.
+# {title} and {subtitle} are HTML-escaped, {marks} is JSON, {png} base64.
+TIMELINE_PAGE = """<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title>
+<style>
+  body { margin: 16px; background: #fcfcfb; color: #0b0b0b; font-family: system-ui, sans-serif; }
+  p.sub { color: #52514e; margin-top: -8px; }
+  .wrap { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+  .plot { position: relative; flex: 1 1 640px; max-width: 1200px; }
+  .plot img { width: 100%; display: block; }
+  .mark { position: absolute; cursor: pointer; border-radius: 3px; }
+  .mark:hover, .mark.on { outline: 2px solid #0b0b0b; background: rgba(11, 11, 11, .08); }
+  #tip { position: fixed; pointer-events: none; display: none; white-space: pre-line; max-width: 320px;
+         background: #0b0b0b; color: #fcfcfb; font-size: 13px; padding: 6px 8px; border-radius: 4px; }
+  #details { flex: 0 1 340px; border: 1px solid #e1e0d9; border-radius: 6px; padding: 12px; background: #fff; }
+  #details h3 { margin: 0 0 8px; font-size: 16px; }
+  #details h4 { margin: 12px 0 4px; font-size: 13px; color: #52514e; }
+  #details pre { white-space: pre-wrap; font: inherit; margin: 0; }
+  #details .muted { color: #898781; font-size: 12px; word-break: break-all; }
+</style></head>
+<body>
+<h2>{title}</h2>
+<p class="sub">{subtitle}</p>
+<div class="wrap">
+  <div class="plot" id="plot"><img alt="{title}" src="data:image/png;base64,{png}"></div>
+  <div id="details"><span class="muted">Click an event on the timeline to see its details.</span></div>
+</div>
+<div id="tip"></div>
+<script>
+const marks = {marks};
+const plot = document.getElementById("plot"), tip = document.getElementById("tip"),
+      details = document.getElementById("details");
+function el(tag, text, cls) {
+  const e = document.createElement(tag);
+  if (text) e.textContent = text;
+  if (cls) e.className = cls;
+  return e;
+}
+function show(mark, box) {
+  document.querySelectorAll(".mark.on").forEach(b => b.classList.remove("on"));
+  box.classList.add("on");
+  details.replaceChildren(el("h3", mark.title), el("pre", mark.summary),
+                          el("h4", "Time roles"), el("pre", mark.times.join("\\n") || "none that is a date"),
+                          el("h4", "Activity"), el("div", mark.id, "muted"));
+  if (mark.graphdb) {
+    const a = el("a", "Open in GraphDB \\u2197");
+    a.href = mark.graphdb; a.target = "_blank"; a.rel = "noopener";
+    const p = el("p"); p.appendChild(a); details.appendChild(p);
+  }
+}
+marks.forEach(mark => {
+  const box = el("div", "", "mark");
+  [box.style.left, box.style.top, box.style.width, box.style.height] = mark.box.map(v => v + "%");
+  box.addEventListener("mousemove", e => {
+    tip.textContent = mark.summary; tip.style.display = "block";
+    tip.style.left = Math.min(e.clientX + 14, innerWidth - tip.offsetWidth - 8) + "px";
+    tip.style.top = (e.clientY + 14) + "px";
+  });
+  box.addEventListener("mouseleave", () => { tip.style.display = "none"; });
+  box.addEventListener("click", () => show(mark, box));
+  plot.appendChild(box);
+});
+</script>
+</body></html>
+"""
 
 
 class DiabetesService:
@@ -186,6 +272,9 @@ class DiabetesService:
             return
 
         text = event.payload.signal.text
+        if text and self._is_timeline_request(text):
+            self._publish(self._show_timeline(scenario_id), scenario_id, event)
+            return
         if not text or not text.strip():
             return
         if self._is_echo(scenario_id, text):
@@ -193,30 +282,46 @@ class DiabetesService:
             return
 
         try:
-            self._event_bus.publish(self._status_topic, Event.for_scenario_payload(
-                scenario_id, StatusEvent("Started processing the utterance", "NLU", progress=0.5, key="agent.model")))
+            ### Update status field
+            statusEvent = Event.for_payload(StatusEvent("Started processing the utterance", "NLU", progress=0.5, key="agent.model"),
+                                            source=event)
+            self._event_bus.publish(self._status_topic, statusEvent)
+
             response, graph_uri = self._conversations[scenario_id].respond(text)
+
             logger.info("Response %r in scenario %s", response, scenario_id)
             if graph_uri:
                 logger.info("Graph URI %r, for topic %s", graph_uri, self._graph_topic)
-            self._event_bus.publish(self._status_topic, Event.for_scenario_payload(
-                scenario_id, StatusEvent("Done processing the utterance", "NLU", progress=0.5, key="agent.model")))
+
+            ### Update status field
+            statusEvent = Event.for_payload(StatusEvent("Done processing the utterance", "NLU", progress=0.5, key="agent.model"),
+                                            source=event)
+            self._event_bus.publish(self._status_topic, statusEvent)
         except Exception:
             logger.exception("Failed to respond to %r in scenario %s", text, scenario_id)
             response, graph_uri = ERROR_REPLY, None
+
         if response:
             self._publish(response, scenario_id, event)
 
+        #### Feedback to UI
         if graph_uri and self._graph_topic:
-            displayEvent = DisplayEvent(graph_uri,"Monitoring")
-            self._event_bus.publish(self._graph_topic, Event.for_scenario_payload(scenario_id,displayEvent))
-           # self._publish(graph_uri, scenario_id, event, topic=self._graph_topic)
-            self._event_bus.publish(self._status_topic, Event.for_scenario_payload(
-                scenario_id, StatusEvent("KG response", "KG", progress=0.5, key="kg.model")))
+            ### Update MONITORING field
+            graphDisplayEvent = Event.for_payload(DisplayEvent(graph_uri,"Monitoring"), source=event)
+            self._event_bus.publish(self._graph_topic, graphDisplayEvent)
+
+            ### Update status field
+            statusEvent = Event.for_payload(StatusEvent("KG response", "KG", progress=0.5, key="kg.model"),
+                                            source=event)
+            self._event_bus.publish(self._status_topic, statusEvent)
+
         elif response:
             logger.info("No graph_uri in response to %r in scenario %s", text, scenario_id)
-            self._event_bus.publish(self._status_topic, Event.for_scenario_payload(
-                scenario_id, StatusEvent("LLM response", "LLM", progress=0.5, key="llm.model")))
+
+            ### Update status field
+            statusEvent = Event.for_payload(StatusEvent("LLM response", "LLM", progress=0.5, key="llm.model"),
+                                            source=event)
+            self._event_bus.publish(self._status_topic, statusEvent)
 
     def _open(self, scenario_id: str, event: Event):
         human = self._speakers.get(scenario_id, self._human)
@@ -273,6 +378,78 @@ class DiabetesService:
                 return True
         return False
 
+    @staticmethod
+    def _is_timeline_request(text: str) -> bool:
+        return bool(TIMELINE_REQUEST.search(text))
+
+    def _show_timeline(self, scenario_id: str) -> str:
+        """Plot the timeline of the human of this scenario from the knowledge graph, write it to
+        an HTML page and open that in a new browser tab. Returns the reply to say."""
+        conversation = self._conversations[scenario_id]
+        # An AskNameConversation only knows its human once the name is given.
+        human = getattr(conversation, "human", None) or self._speakers.get(scenario_id, self._human)
+        try:
+            path = self._write_timeline_page(conversation, human, scenario_id)
+            webbrowser.open_new_tab(path.as_uri())
+            logger.info("Opened the timeline of %s in scenario %s: %s", human, scenario_id, path)
+        except Exception:
+            logger.exception("Failed to show the timeline of %s in scenario %s", human, scenario_id)
+            return TIMELINE_ERROR_REPLY
+
+        return TIMELINE_REPLY.format(human=human)
+
+    def _write_timeline_page(self, conversation, human: str, scenario_id: str) -> Path:
+        # Imported here: matplotlib is only needed when a timeline is asked for, and the
+        # service's worker thread must not use an interactive (GUI) backend.
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+        from cltl.plots.patient_timeline import (describe_entry, fetch_timeline_entries, mark_regions,
+                                                 plot_patient_timeline)
+
+        entries = fetch_timeline_entries(self._ltm, human)
+        fig = plot_patient_timeline(entries, human, current_date=datetime.now(), days=TIMELINE_DAYS,
+                                    last_conversation_date=getattr(conversation, "last_conversation_date",
+                                                                   None))
+        try:
+            # Drawn on an Agg canvas of its own, so the boxes measured after drawing
+            # (mark_regions()) match the pixels of the PNG exactly.
+            fig.set_dpi(TIMELINE_DPI)
+            canvas = FigureCanvasAgg(fig)
+            canvas.draw()
+            regions = mark_regions(fig, canvas.get_renderer())
+            image = io.BytesIO()
+            canvas.print_png(image)
+            width, height = canvas.get_width_height()
+        finally:
+            plt.close(fig)
+
+        kg_address = getattr(conversation, "_kg_address", None)
+        marks = [{"box": [round(100 * x0 / width, 3), round(100 * y0 / height, 3),
+                          round(100 * (x1 - x0) / width, 3), round(100 * (y1 - y0) / height, 3)],
+                  "title": f"{entry['type'].replace('_', ' ')}: {entry['label'] or entry['id'].rsplit('/', 1)[-1]}",
+                  "summary": describe_entry(entry),
+                  "times": [f"{role}: {', '.join(d.strftime('%Y-%m-%d') for d in dates)}"
+                            for role, dates in entry.get("times", {}).items()],
+                  "id": entry["id"],
+                  "graphdb": _graphdb_url(kg_address, entry["id"])}
+                 for entry, (x0, y0, x1, y1) in regions]
+
+        page = (TIMELINE_PAGE
+                .replace("{title}", html.escape(f"Timeline of {human}"))
+                .replace("{subtitle}", html.escape(f"{datetime.now().strftime('%a %d %b %Y %H:%M')}, "
+                                                   f"{len(entries)} entries in the knowledge graph. "
+                                                   f"Point at an event for its details, click to keep them."))
+                .replace("{png}", base64.b64encode(image.getvalue()).decode("ascii"))
+                # </ cannot end the script element early: labels come from what the patient said.
+                .replace("{marks}", json.dumps(marks).replace("</", "<\\/")))
+
+        name = re.sub(r"[^A-Za-z0-9_.-]", "_", f"timeline_{human}_{scenario_id}")
+        path = Path(tempfile.gettempdir()) / f"{name}.html"
+        path.write_text(page, encoding="utf-8")
+        return path
+
     def _publish(self, response: Optional[str], scenario_id: str, source: Event,
                  topic: Optional[str] = None):
         if not response:
@@ -323,6 +500,18 @@ class DiabetesService:
                 "country": _field(location, "country") or "Unknown",
                 "region": _field(location, "region") or "Unknown",
                 "city": _field(location, "city") or "Unknown"}
+
+
+def _graphdb_url(kg_address: Optional[str], uri: str) -> Optional[str]:
+    """GraphDB's own view of `uri`, or None without a knowledge graph address."""
+    if not kg_address:
+        return None
+    try:
+        from cltl.kg_chat.graphdb_links import graphdb_visualization_url
+        return graphdb_visualization_url(kg_address, uri)
+    except Exception:
+        logger.exception("Failed to make the GraphDB link for %s", uri)
+        return None
 
 
 def _parse_location(location):
